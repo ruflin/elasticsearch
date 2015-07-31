@@ -3,3 +3,6 @@ jdk:
   - openjdk7
   
 script: mvn test -Dtests.slow=true
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
