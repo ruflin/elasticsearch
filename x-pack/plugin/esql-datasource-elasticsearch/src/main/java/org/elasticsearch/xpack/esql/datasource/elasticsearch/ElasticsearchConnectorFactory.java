@@ -19,6 +19,7 @@ import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.datasources.spi.ConfigKeyValidator;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
+import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 
@@ -63,6 +64,12 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     @Override
     public void validateConfig(String location, Map<String, Object> config) {
         ConfigKeyValidator.check(config, List.of(Set.of(CONFIG_API_KEY)));
+    }
+
+    @Override
+    public FilterPushdownSupport filterPushdownSupport() {
+        // The remote source speaks ES|QL, so filters are pushed by re-rendering them into a remote WHERE clause.
+        return EsqlFilterTranslator.INSTANCE;
     }
 
     @Override

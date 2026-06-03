@@ -8,6 +8,14 @@
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xpack.esql.core.expression.Expression;
+import org.elasticsearch.xpack.esql.core.expression.FieldAttribute;
+import org.elasticsearch.xpack.esql.core.expression.Literal;
+import org.elasticsearch.xpack.esql.core.tree.Source;
+import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.core.type.EsField;
+import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 
 import java.util.List;
 import java.util.Map;
@@ -81,7 +89,39 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     }
 
     public void testBuildRemoteQueryNoProjection() {
-        var request = new org.elasticsearch.xpack.esql.datasources.spi.QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, null);
+        var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, null);
         assertEquals("FROM logs", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesLimit() {
+        var request = new QueryRequest("logs", List.of("message"), List.of(), Map.of(), 1000, 5, null);
+        assertEquals("FROM logs | KEEP message | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesFilter() {
+        Expression filter = new GreaterThan(
+            Source.EMPTY,
+            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new Literal(Source.EMPTY, 10, DataType.INTEGER),
+            null
+        );
+        var request = new QueryRequest("logs", List.of("count"), List.of(), Map.of(), 1000, FormatNoLimit.VALUE, List.of(filter), null);
+        assertEquals("FROM logs | WHERE `count` > 10 | KEEP count", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesFilterAndLimit() {
+        Expression filter = new GreaterThan(
+            Source.EMPTY,
+            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new Literal(Source.EMPTY, 10, DataType.INTEGER),
+            null
+        );
+        var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, 3, List.of(filter), null);
+        assertEquals("FROM logs | WHERE `count` > 10 | LIMIT 3", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    /** Mirror of {@link org.elasticsearch.xpack.esql.datasources.spi.FormatReader#NO_LIMIT} for readable test code. */
+    private static final class FormatNoLimit {
+        static final int VALUE = org.elasticsearch.xpack.esql.datasources.spi.FormatReader.NO_LIMIT;
     }
 }

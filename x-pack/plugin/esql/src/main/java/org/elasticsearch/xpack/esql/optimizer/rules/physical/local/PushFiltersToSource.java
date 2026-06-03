@@ -22,6 +22,7 @@ import org.elasticsearch.xpack.esql.datasources.FilterEvaluationOrderEstimator;
 import org.elasticsearch.xpack.esql.datasources.FormatReaderRegistry;
 import org.elasticsearch.xpack.esql.datasources.PhysicalNames;
 import org.elasticsearch.xpack.esql.datasources.spi.ErrorPolicy;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.expression.predicate.Predicates;
@@ -253,6 +254,10 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         FormatReader formatReader = resolveFormatReader(externalExec.sourceType(), ctx);
         FilterPushdownSupport pushdownSupport = formatReader != null ? formatReader.filterPushdownSupport() : null;
         if (pushdownSupport == null) {
+            // Connector-based sources (e.g. the elasticsearch connector) declare pushdown on their factory.
+            pushdownSupport = resolveConnectorFilterPushdownSupport(externalExec.sourceType(), ctx);
+        }
+        if (pushdownSupport == null) {
             return filterExec;
         }
 
@@ -267,7 +272,9 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         // signal the reader keys late materialization off, and by the time the factory sees the plan the FilterExec
         // for a Pushability.YES conjunct has already been dropped -- so the factory can neither suppress the filter
         // (rows would leak unfiltered) nor undo the late-mat decision it implies.
-        if (formatReader.dropsRowsUnderPushedFilter() == false
+        // Connector sources have no FormatReader; skip_row is a file-reader concern and does not apply.
+        if (formatReader != null
+            && formatReader.dropsRowsUnderPushedFilter() == false
             && externalExec.declaredReadSpec().dropsRowsOnCoercionFailure(ErrorPolicy.forReader(externalExec.config(), formatReader))) {
             return filterExec;
         }
@@ -361,6 +368,18 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
     static FormatReader resolveFormatReader(String formatName, LocalPhysicalOptimizerContext ctx) {
         FormatReaderRegistry formatReaderRegistry = ctx == null || ctx.external() == null ? null : ctx.external().formatReaderRegistry();
         return formatReaderRegistry != null ? formatReaderRegistry.findByName(formatName) : null;
+    }
+
+    /**
+     * Connector-based sources (which have no {@link FormatReader}) expose filter pushdown through
+     * {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type.
+     */
+    private static FilterPushdownSupport resolveConnectorFilterPushdownSupport(String sourceType, LocalPhysicalOptimizerContext ctx) {
+        if (ctx == null || ctx.external() == null || sourceType == null) {
+            return null;
+        }
+        ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
+        return factory != null ? factory.filterPushdownSupport() : null;
     }
 
     private static PhysicalPlan planFilterExec(FilterExec filterExec, ParameterizedQueryExec pqExec, LocalPhysicalOptimizerContext ctx) {

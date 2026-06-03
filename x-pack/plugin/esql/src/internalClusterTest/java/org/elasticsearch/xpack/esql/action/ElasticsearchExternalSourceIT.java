@@ -30,11 +30,9 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
 import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
-import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 
@@ -120,20 +118,79 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
         String query = "EXTERNAL \"" + location + "\" | KEEP name, age | SORT age";
 
-        try (var response = run(syncEsqlQueryRequest(query))) {
-            List<String> columns = response.columns().stream().map(c -> c.name()).collect(Collectors.toList());
-            assertThat(columns, containsInAnyOrder("name", "age"));
+        List<List<Object>> rows = runExternal(query);
+        assertThat(rows.size(), equalTo(3));
+        assertThat(rows, hasItem(List.of("alice", 30L)));
+        assertThat(rows, hasItem(List.of("bob", 35L)));
+        assertThat(rows, hasItem(List.of("carol", 40L)));
+    }
 
+    public void testFilterPushdownReturnsSubset() throws Exception {
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String remoteIndex = "remote-logs-filter";
+        indexRemoteDocs(remoteIndex);
+
+        String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
+        // WHERE on age is translated to a remote `| WHERE age > 30`; the local FilterExec stays as a safety net.
+        String query = "EXTERNAL \"" + location + "\" | WHERE age > 30 | KEEP name, age | SORT age";
+
+        List<List<Object>> rows = runExternal(query);
+        assertThat(rows.size(), equalTo(2));
+        assertThat(rows.get(0), equalTo(List.of("bob", 35L)));
+        assertThat(rows.get(1), equalTo(List.of("carol", 40L)));
+    }
+
+    public void testFilterPushdownOnKeyword() throws Exception {
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String remoteIndex = "remote-logs-keyword";
+        indexRemoteDocs(remoteIndex);
+
+        String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
+        String query = "EXTERNAL \"" + location + "\" | WHERE name == \"alice\" | KEEP name, age";
+
+        List<List<Object>> rows = runExternal(query);
+        assertThat(rows.size(), equalTo(1));
+        assertThat(rows.get(0), equalTo(List.of("alice", 30L)));
+    }
+
+    public void testLimitPushdownCapsRows() throws Exception {
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String remoteIndex = "remote-logs-limit";
+        indexRemoteDocs(remoteIndex);
+
+        String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
+        String query = "EXTERNAL \"" + location + "\" | KEEP name, age | LIMIT 2";
+
+        List<List<Object>> rows = runExternal(query);
+        assertThat(rows.size(), equalTo(2));
+    }
+
+    public void testFilterAndLimitPushdownTogether() throws Exception {
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String remoteIndex = "remote-logs-filter-limit";
+        indexRemoteDocs(remoteIndex);
+
+        String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
+        String query = "EXTERNAL \"" + location + "\" | WHERE age >= 35 | KEEP name, age | SORT age | LIMIT 1";
+
+        List<List<Object>> rows = runExternal(query);
+        assertThat(rows.size(), equalTo(1));
+        assertThat(rows.get(0), equalTo(List.of("bob", 35L)));
+    }
+
+    private List<List<Object>> runExternal(String query) {
+        try (var response = run(syncEsqlQueryRequest(query))) {
             List<List<Object>> rows = new ArrayList<>();
             for (Iterator<Iterator<Object>> it = response.values(); it.hasNext();) {
                 List<Object> row = new ArrayList<>();
                 it.next().forEachRemaining(row::add);
                 rows.add(row);
             }
-            assertThat(rows.size(), equalTo(3));
-            assertThat(rows, hasItem(List.of("alice", 30L)));
-            assertThat(rows, hasItem(List.of("bob", 35L)));
-            assertThat(rows, hasItem(List.of("carol", 40L)));
+            return rows;
         }
     }
 
