@@ -70,6 +70,7 @@ import org.elasticsearch.xpack.esql.datasources.SplitCoalescer;
 import org.elasticsearch.xpack.esql.datasources.SplitDiscoveryPhase;
 import org.elasticsearch.xpack.esql.datasources.SplitStats;
 import org.elasticsearch.xpack.esql.datasources.spi.AggregatePushdownSupport;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -262,6 +263,10 @@ public class ComputeService {
 
     FormatReaderRegistry formatReaderRegistry() {
         return formatReaderRegistry;
+    }
+
+    Map<String, ExternalSourceFactory> sourceFactories() {
+        return operatorFactoryRegistry == null ? Map.of() : operatorFactoryRegistry.sourceFactories();
     }
 
     PhysicalPlan discoverSplits(PhysicalPlan plan, Configuration configuration, EsqlExecutionInfo execInfo, BooleanSupplier isCancelled) {
@@ -1447,6 +1452,7 @@ public class ComputeService {
                         plan,
                         SearchContextStats.from(localContexts),
                         formatReaderRegistry,
+                        operatorFactoryRegistry.sourceFactories(),
                         coordinatorExternalSplits,
                         planTimeProfile
                     );

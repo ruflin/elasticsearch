@@ -38,6 +38,7 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.util.Holder;
 import org.elasticsearch.xpack.esql.core.util.Queries;
 import org.elasticsearch.xpack.esql.datasources.FormatReaderRegistry;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.expression.predicate.Predicates;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamWrapperQueryBuilder;
@@ -80,6 +81,7 @@ import org.elasticsearch.xpack.esql.stats.SearchStats;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -364,6 +366,37 @@ public class PlannerUtils {
         List<? extends ExternalSplit> externalSplits,
         PlanTimeProfile planTimeProfile
     ) {
+        return localPlan(
+            plannerSettings,
+            flags,
+            configuration,
+            foldCtx,
+            plan,
+            searchStats,
+            formatReaderRegistry,
+            Map.of(),
+            externalSplits,
+            planTimeProfile
+        );
+    }
+
+    /**
+     * Variant that also receives the registered {@link ExternalSourceFactory} instances so connector-based
+     * external sources can participate in capability-driven rules (e.g. filter pushdown via
+     * {@link ExternalSourceFactory#filterPushdownSupport()}).
+     */
+    public static PhysicalPlan localPlan(
+        PlannerSettings plannerSettings,
+        EsqlFlags flags,
+        Configuration configuration,
+        FoldContext foldCtx,
+        PhysicalPlan plan,
+        SearchStats searchStats,
+        FormatReaderRegistry formatReaderRegistry,
+        Map<String, ExternalSourceFactory> sourceFactories,
+        List<? extends ExternalSplit> externalSplits,
+        PlanTimeProfile planTimeProfile
+    ) {
         final var logicalOptimizer = new LocalLogicalPlanOptimizer(new LocalLogicalOptimizerContext(configuration, foldCtx, searchStats));
         var physicalOptimizer = new LocalPhysicalPlanOptimizer(
             new LocalPhysicalOptimizerContext(
@@ -372,7 +405,7 @@ public class PlannerUtils {
                 configuration,
                 foldCtx,
                 searchStats,
-                new ExternalOptimizerContext(formatReaderRegistry)
+                new ExternalOptimizerContext(formatReaderRegistry, sourceFactories)
             )
         );
 
