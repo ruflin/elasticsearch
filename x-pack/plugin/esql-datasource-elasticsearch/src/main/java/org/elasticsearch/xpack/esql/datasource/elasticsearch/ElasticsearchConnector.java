@@ -19,6 +19,7 @@ import org.elasticsearch.xcontent.json.JsonXContent;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
+import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
@@ -63,11 +64,21 @@ class ElasticsearchConnector implements Connector {
     }
 
     /**
-     * Builds the ES|QL string sent to the remote cluster. v1 always issues a {@code FROM <target>}
-     * and applies the row limit (if any) remotely so we do not pull the entire index across the wire.
+     * Builds the ES|QL string sent to the remote cluster. Issues a {@code FROM <target>} and, where
+     * possible, pushes work to the remote cluster so less data crosses the wire:
+     * <ul>
+     *   <li>{@code WHERE} for the pushed filter expressions (best-effort; see {@link EsqlFilterTranslator}),</li>
+     *   <li>{@code KEEP} for the projected columns,</li>
+     *   <li>{@code LIMIT} for the pushed row limit (if any).</li>
+     * </ul>
+     * The local plan keeps a safety-net {@code FilterExec}/{@code LimitExec} above the source, so an
+     * over- or under-rendered pushdown can never produce wrong results — it only affects how much data
+     * is transferred.
      */
     static String buildRemoteQuery(QueryRequest request) {
         StringBuilder query = new StringBuilder("FROM ").append(request.target());
+        // Filter remotely so the remote cluster discards non-matching rows before returning them.
+        EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
         // Project only the columns the local query needs so the remote cluster returns less data.
         List<String> projected = request.projectedColumns();
         if (projected != null && projected.isEmpty() == false) {
@@ -78,6 +89,11 @@ class ElasticsearchConnector implements Connector {
                 }
                 query.append(projected.get(i));
             }
+        }
+        // Push the row limit so the remote cluster stops early instead of returning every matching row.
+        int rowLimit = request.rowLimit();
+        if (rowLimit != FormatReader.NO_LIMIT && rowLimit >= 0) {
+            query.append(" | LIMIT ").append(rowLimit);
         }
         return query.toString();
     }

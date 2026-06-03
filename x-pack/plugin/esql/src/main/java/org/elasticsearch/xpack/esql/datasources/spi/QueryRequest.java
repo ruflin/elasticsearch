@@ -9,6 +9,7 @@ package org.elasticsearch.xpack.esql.datasources.spi;
 
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
+import org.elasticsearch.xpack.esql.core.expression.Expression;
 
 import java.util.List;
 import java.util.Map;
@@ -16,6 +17,12 @@ import java.util.Map;
 /**
  * Describes a query to execute against a connector.
  * Immutable; use {@link #withBlockFactory} to create a copy bound to a specific driver context.
+ *
+ * @param pushedFilters AND-separated ESQL filter expressions the optimizer asked the connector to apply
+ *        remotely (see {@link FilterPushdownSupport}). Empty when no filter was pushed. These are the
+ *        original {@link Expression}s; connectors that natively understand ESQL (e.g. the elasticsearch
+ *        connector) translate them back into a remote {@code WHERE} clause. Never serialized: connectors
+ *        execute on the coordinator only, so the expressions are produced and consumed in the same JVM.
  */
 public record QueryRequest(
     String target,
@@ -24,8 +31,13 @@ public record QueryRequest(
     Map<String, Object> config,
     int batchSize,
     int rowLimit,
+    List<Expression> pushedFilters,
     BlockFactory blockFactory
 ) {
+
+    public QueryRequest {
+        pushedFilters = pushedFilters != null ? List.copyOf(pushedFilters) : List.of();
+    }
 
     public QueryRequest(
         String target,
@@ -35,10 +47,22 @@ public record QueryRequest(
         int batchSize,
         BlockFactory blockFactory
     ) {
-        this(target, projectedColumns, attributes, config, batchSize, FormatReader.NO_LIMIT, blockFactory);
+        this(target, projectedColumns, attributes, config, batchSize, FormatReader.NO_LIMIT, List.of(), blockFactory);
+    }
+
+    public QueryRequest(
+        String target,
+        List<String> projectedColumns,
+        List<Attribute> attributes,
+        Map<String, Object> config,
+        int batchSize,
+        int rowLimit,
+        BlockFactory blockFactory
+    ) {
+        this(target, projectedColumns, attributes, config, batchSize, rowLimit, List.of(), blockFactory);
     }
 
     public QueryRequest withBlockFactory(BlockFactory blockFactory) {
-        return new QueryRequest(target, projectedColumns, attributes, config, batchSize, rowLimit, blockFactory);
+        return new QueryRequest(target, projectedColumns, attributes, config, batchSize, rowLimit, pushedFilters, blockFactory);
     }
 }
