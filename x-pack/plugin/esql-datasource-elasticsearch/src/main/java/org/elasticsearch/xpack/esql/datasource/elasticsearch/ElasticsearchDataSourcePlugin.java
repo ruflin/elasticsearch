@@ -11,6 +11,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
 
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +26,19 @@ import java.util.Set;
 public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourcePlugin {
 
     static final String TYPE = "elasticsearch";
+
+    @Override
+    public Set<String> supportedSchemes() {
+        return Set.of("es", "elasticsearch");
+    }
+
+    @Override
+    public Map<String, StorageProviderFactory> storageProviders(Settings settings) {
+        // A placeholder storage provider so the resolver can register a concrete file-list entry;
+        // actual reads go through the connector. See ElasticsearchStorageProvider.
+        StorageProviderFactory factory = StorageProviderFactory.noConfigKeys(ElasticsearchStorageProvider::new);
+        return Map.of("es", factory, "elasticsearch", factory);
+    }
 
     @Override
     public Set<String> supportedConnectorSchemes() {
