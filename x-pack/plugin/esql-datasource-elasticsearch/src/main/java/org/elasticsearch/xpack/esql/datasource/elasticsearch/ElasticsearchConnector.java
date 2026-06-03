@@ -28,7 +28,9 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 
 /**
  * Live connection to a remote Elasticsearch cluster. Runs an ES|QL query against the remote
@@ -85,25 +87,31 @@ class ElasticsearchConnector implements Connector {
         return "{\"query\":\"" + esqlQuery.replace("\"", "\\\"") + "\",\"columnar\":true}";
     }
 
+    @SuppressWarnings("unchecked")
     private ResultCursor parseResponse(Response response, BlockFactory blockFactory) {
-        List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
-        List<List<Object>> columnValues = new ArrayList<>();
-        int rowCount = 0;
+        Map<String, Object> body;
         try (
             InputStream content = response.getEntity().getContent();
             XContentParser parser = JsonXContent.jsonXContent.createParser(XContentParserConfiguration.EMPTY, content)
         ) {
-            parser.nextToken();
-            String fieldName;
-            while ((fieldName = nextFieldName(parser)) != null) {
-                switch (fieldName) {
-                    case "columns" -> parseColumns(parser, columns);
-                    case "values" -> rowCount = parseColumnarValues(parser, columnValues);
-                    default -> parser.skipChildren();
-                }
-            }
+            body = parser.map();
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to parse remote ES|QL response", e);
+        }
+
+        List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
+        for (Object columnObj : (List<Object>) body.getOrDefault("columns", List.of())) {
+            Map<String, Object> column = (Map<String, Object>) columnObj;
+            columns.add(
+                new EsqlTypeMapping.RemoteColumn(Objects.toString(column.get("name"), null), Objects.toString(column.get("type"), null))
+            );
+        }
+
+        // columnar=true => values is an array of columns, each an array of row values.
+        List<Object> columnValues = (List<Object>) body.getOrDefault("values", List.of());
+        int rowCount = 0;
+        for (Object columnObj : columnValues) {
+            rowCount = Math.max(rowCount, ((List<Object>) columnObj).size());
         }
 
         List<Attribute> attributes = EsqlTypeMapping.toAttributes(columns);
@@ -112,7 +120,7 @@ class ElasticsearchConnector implements Connector {
         try {
             for (int col = 0; col < attributes.size(); col++) {
                 DataType type = attributes.get(col).dataType();
-                List<Object> values = col < columnValues.size() ? columnValues.get(col) : List.of();
+                List<Object> values = col < columnValues.size() ? (List<Object>) columnValues.get(col) : List.of();
                 blocks[col] = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
             }
             success = true;
@@ -127,66 +135,6 @@ class ElasticsearchConnector implements Connector {
         }
         Page page = rowCount == 0 ? null : new Page(rowCount, blocks);
         return new SinglePageCursor(page);
-    }
-
-    private static String nextFieldName(XContentParser parser) throws IOException {
-        XContentParser.Token token = parser.nextToken();
-        if (token == XContentParser.Token.FIELD_NAME) {
-            return parser.currentName();
-        }
-        return null;
-    }
-
-    private static void parseColumns(XContentParser parser, List<EsqlTypeMapping.RemoteColumn> columns) throws IOException {
-        parser.nextToken(); // START_ARRAY
-        while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-            String name = null;
-            String type = null;
-            String field;
-            while ((field = nextFieldName(parser)) != null) {
-                parser.nextToken();
-                if ("name".equals(field)) {
-                    name = parser.text();
-                } else if ("type".equals(field)) {
-                    type = parser.text();
-                } else {
-                    parser.skipChildren();
-                }
-            }
-            columns.add(new EsqlTypeMapping.RemoteColumn(name, type));
-        }
-    }
-
-    /**
-     * Parses a columnar {@code values} array: an array of columns, each an array of row values.
-     * Returns the row count (length of the first column, 0 when empty).
-     */
-    private static int parseColumnarValues(XContentParser parser, List<List<Object>> columnValues) throws IOException {
-        parser.nextToken(); // START_ARRAY (outer)
-        int rowCount = 0;
-        while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-            List<Object> column = new ArrayList<>();
-            while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-                column.add(parser.currentToken() == XContentParser.Token.VALUE_NULL ? null : scalarValue(parser));
-            }
-            columnValues.add(column);
-            rowCount = Math.max(rowCount, column.size());
-        }
-        return rowCount;
-    }
-
-    private static Object scalarValue(XContentParser parser) throws IOException {
-        return switch (parser.currentToken()) {
-            case VALUE_STRING -> parser.text();
-            case VALUE_NUMBER -> parser.numberValue();
-            case VALUE_BOOLEAN -> parser.booleanValue();
-            case VALUE_NULL -> null;
-            // Multi-valued cells arrive as a nested array; v1 collapses them to their string form.
-            default -> {
-                parser.skipChildren();
-                yield null;
-            }
-        };
     }
 
     @Override
