@@ -141,7 +141,7 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
             return Optional.empty();
         }
         String effectiveSymbol = flipped ? flip(symbol) : symbol;
-        return Optional.of(quoteField(field.name()) + " " + effectiveSymbol + " " + value.get());
+        return Optional.of(EsqlIdentifiers.quote(field.name()) + " " + effectiveSymbol + " " + value.get());
     }
 
     private static String comparisonSymbol(EsqlBinaryComparison cmp) {
@@ -197,10 +197,5 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
 
     private static String quoteString(String value) {
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
-    }
-
-    /** Quote field names so identifiers with dots or special characters remain valid ESQL. */
-    private static String quoteField(String name) {
-        return "`" + name.replace("`", "``") + "`";
     }
 }

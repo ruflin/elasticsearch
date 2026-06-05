@@ -109,9 +109,8 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     private static List<Attribute> resolveSchema(RestClient client, String target) throws IOException {
-        Request request = new Request("POST", "/_query");
-        request.addParameter("format", "json");
-        request.setJsonEntity("{\"query\":\"FROM " + target + " | LIMIT 0\",\"columnar\":true}");
+        // Same validation/quoting as a real query so a crafted target can't inject into the schema probe.
+        Request request = RemoteQuery.request("FROM " + EsqlIdentifiers.validateTarget(target) + " | LIMIT 0");
         Response response = client.performRequest(request);
         List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
         try (

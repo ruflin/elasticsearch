@@ -492,6 +492,11 @@ public final class DataSourceModule implements Closeable {
 
         @Override
         public FilterPushdownSupport filterPushdownSupport() {
+            // Intentionally resolves (and thereby class-loads) the delegate plugin during physical
+            // optimization when a query has a pushable filter. Pushdown support is instance behavior of
+            // the connector factory rather than static plugin metadata, so it cannot be answered without
+            // the plugin. This is accepted: a query that triggers this is about to execute against the
+            // connector anyway, so the plugin would load momentarily. See DataSourceModuleLazyLoadingTests.
             return resolveDelegate().filterPushdownSupport();
         }
 
