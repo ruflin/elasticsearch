@@ -66,7 +66,10 @@ public record SourceOperatorContext(
     @Nullable String datasetName,
     boolean deferredExtraction,
     DeclaredReadSpec declaredReadSpec,
-    List<RemoteSort> pushedSort
+    List<RemoteSort> pushedSort,
+    List<RemoteAggregate> pushedAggregates,
+    List<String> pushedGroupings,
+    boolean aggregateIntermediateState
 ) {
     /**
      * Single source of truth for the {@code max_concurrent_open_segments} default. Lives in this SPI (leaf)
@@ -84,6 +87,8 @@ public record SourceOperatorContext(
         sourceMetadata = sourceMetadata != null ? Map.copyOf(sourceMetadata) : Map.of();
         pushedExpressions = pushedExpressions != null ? List.copyOf(pushedExpressions) : List.of();
         pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
+        pushedAggregates = pushedAggregates != null ? List.copyOf(pushedAggregates) : List.of();
+        pushedGroupings = pushedGroupings != null ? List.copyOf(pushedGroupings) : List.of();
         schemaMap = schemaMap != null ? schemaMap : Map.of();
         partitionColumnNames = partitionColumnNames != null && partitionColumnNames.isEmpty() == false
             ? Collections.unmodifiableSet(new LinkedHashSet<>(partitionColumnNames))
@@ -147,7 +152,10 @@ public record SourceOperatorContext(
             null,
             false,
             DeclaredReadSpec.NONE,
-            List.of()
+            List.of(),
+            List.of(),
+            List.of(),
+            false
         );
     }
 
@@ -190,7 +198,10 @@ public record SourceOperatorContext(
             null,
             false,
             DeclaredReadSpec.NONE,
-            List.of()
+            List.of(),
+            List.of(),
+            List.of(),
+            false
         );
     }
 
@@ -232,7 +243,10 @@ public record SourceOperatorContext(
             null,
             false,
             DeclaredReadSpec.NONE,
-            List.of()
+            List.of(),
+            List.of(),
+            List.of(),
+            false
         );
     }
 
@@ -272,7 +286,10 @@ public record SourceOperatorContext(
             null,
             false,
             DeclaredReadSpec.NONE,
-            List.of()
+            List.of(),
+            List.of(),
+            List.of(),
+            false
         );
     }
 
@@ -311,6 +328,9 @@ public record SourceOperatorContext(
         private boolean deferredExtraction;
         private DeclaredReadSpec declaredReadSpec = DeclaredReadSpec.NONE;
         private List<RemoteSort> pushedSort;
+        private List<RemoteAggregate> pushedAggregates;
+        private List<String> pushedGroupings;
+        private boolean aggregateIntermediateState;
 
         public Builder sourceType(String sourceType) {
             this.sourceType = sourceType;
@@ -469,6 +489,21 @@ public record SourceOperatorContext(
             return this;
         }
 
+        public Builder pushedAggregates(List<RemoteAggregate> pushedAggregates) {
+            this.pushedAggregates = pushedAggregates;
+            return this;
+        }
+
+        public Builder pushedGroupings(List<String> pushedGroupings) {
+            this.pushedGroupings = pushedGroupings;
+            return this;
+        }
+
+        public Builder aggregateIntermediateState(boolean aggregateIntermediateState) {
+            this.aggregateIntermediateState = aggregateIntermediateState;
+            return this;
+        }
+
         public SourceOperatorContext build() {
             return new SourceOperatorContext(
                 sourceType,
@@ -496,7 +531,10 @@ public record SourceOperatorContext(
                 datasetName,
                 deferredExtraction,
                 declaredReadSpec,
-                pushedSort
+                pushedSort,
+                pushedAggregates,
+                pushedGroupings,
+                aggregateIntermediateState
             );
         }
     }

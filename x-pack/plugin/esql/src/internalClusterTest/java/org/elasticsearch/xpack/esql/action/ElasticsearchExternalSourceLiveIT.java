@@ -33,7 +33,6 @@ import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQuery
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -159,19 +158,17 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
     }
 
     /**
-     * Documents a known v1 limitation: an unbounded aggregate (no explicit LIMIT) over the connector does
-     * NOT match a direct aggregate, because there is no STATS pushdown and the remote {@code FROM} caps the
-     * pulled rows (~1000). The connector aggregate is therefore computed over a truncated row set. This test
-     * asserts the capped behavior so the gap is tracked rather than silently passing.
+     * STATS COUNT(*) is pushed to the remote, so the connector computes the count server-side over the full
+     * data set and matches a direct aggregate exactly — no longer capped by the implicit FROM page size.
      */
-    public void testUnboundedAggregateIsCappedKnownLimitation() throws Exception {
+    public void testUngroupedCountPushdownMatchesDirect() throws Exception {
         assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         long direct = ((Number) directValues("FROM " + TARGET + " | STATS c = COUNT(*)").get(0).get(0)).longValue();
         long viaConnector = ((Number) runExternal(externalSource() + " | STATS c = COUNT(*)").get(0).get(0)).longValue();
-        assertThat("remote has far more than the connector's pulled cap", direct, greaterThan(10_000L));
-        assertThat("connector count is capped by the implicit FROM page size, not the true total", viaConnector, lessThan(direct));
+        assertThat("remote has a substantial number of rows", direct, greaterThan(10_000L));
+        assertThat("connector count matches the direct full-dataset count (STATS pushed down)", viaConnector, equalTo(direct));
     }
 
     private List<List<Object>> runExternal(String query) {
