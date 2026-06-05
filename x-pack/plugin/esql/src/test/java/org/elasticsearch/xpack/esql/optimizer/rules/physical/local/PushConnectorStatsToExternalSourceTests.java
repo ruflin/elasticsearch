@@ -130,19 +130,66 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertEquals(intermediate, resultExt.output());
     }
 
-    public void testNotPushedForMultipleGroupingKeys() {
+    public void testGroupedStatsMultipleKeysPushed() {
+        // STATS c = COUNT(*) BY message, level
         ExternalSourceExec ext = connectorSource();
-        ReferenceAttribute other = referenceAttribute("level", DataType.KEYWORD);
+        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        List<Attribute> intermediate = List.of(
+            MESSAGE,
+            level,
+            referenceAttribute("c", DataType.LONG),
+            referenceAttribute("c$seen", DataType.BOOLEAN)
+        );
         AggregateExec agg = new AggregateExec(
             Source.EMPTY,
             ext,
-            List.of(MESSAGE, other),
-            List.of(countStar(), MESSAGE, other),
+            List.of(MESSAGE, level),
+            List.of(countStar(), MESSAGE, level),
             AggregatorMode.INITIAL,
-            List.of(MESSAGE, other, referenceAttribute("c", DataType.LONG), referenceAttribute("c$seen", DataType.BOOLEAN)),
+            intermediate,
             null
         );
-        // Multiple BY keys are out of this step's scope.
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals(List.of("message", "level"), resultExt.pushedGroupings());
+        assertEquals(1, resultExt.pushedAggregates().size());
+        assertTrue(resultExt.pushedAggregateIntermediate());
+        assertEquals(intermediate, resultExt.output());
+    }
+
+    public void testNotPushedForGroupedMinMax() {
+        // STATS m = MAX(message) BY level: grouped MIN/MAX would need a dense per-group value channel with the seen
+        // marker carrying presence; the connector cannot represent a null per-group MIN/MAX, so it stays local.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(level),
+            List.of(alias("m", new Max(Source.EMPTY, MESSAGE)), level),
+            AggregatorMode.INITIAL,
+            List.of(level, referenceAttribute("m", DataType.KEYWORD), referenceAttribute("m$seen", DataType.BOOLEAN)),
+            null
+        );
+        PhysicalPlan result = applyRule(agg, true);
+        assertThat(result, instanceOf(AggregateExec.class));
+    }
+
+    public void testNotPushedForNonAttributeGrouping() {
+        // A grouping that is not a plain attribute (here a literal stands in for e.g. BY bucket(...)) is out of scope.
+        ExternalSourceExec ext = connectorSource();
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(Literal.keyword(Source.EMPTY, "g")),
+            List.of(countStar()),
+            AggregatorMode.INITIAL,
+            List.of(referenceAttribute("c", DataType.LONG), referenceAttribute("c$seen", DataType.BOOLEAN)),
+            null
+        );
         PhysicalPlan result = applyRule(agg, true);
         assertThat(result, instanceOf(AggregateExec.class));
     }
