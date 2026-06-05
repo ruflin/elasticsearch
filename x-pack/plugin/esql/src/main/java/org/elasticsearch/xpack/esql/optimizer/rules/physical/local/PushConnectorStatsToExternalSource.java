@@ -50,12 +50,13 @@ import java.util.List;
  * </ul>
  * {@code FINAL} is never matched here because a FINAL aggregate's child is the INITIAL aggregate, not the source.
  *
- * <p>The rule bails out when the source already carries pushed scan predicates, a pushed sort, or a pushed limit
- * (which would change the row set the remote aggregates over relative to what the surviving plan expects).
+ * <p>The rule can combine a pushed filter with the aggregate because connectors render {@code WHERE} before
+ * {@code STATS}. It bails out when the source already carries a pushed sort or limit, which would change the row
+ * set the remote aggregates over relative to what the surviving plan expects.
  *
- * <p>This step supports ungrouped {@code COUNT(*)} / {@code COUNT(field)}. Other functions and {@code BY}
- * groupings are added incrementally; anything not yet supported leaves the plan untouched so the local aggregate
- * runs normally.
+ * <p>This step supports {@code COUNT(*)} / {@code COUNT(field)} with or without groupings, and ungrouped
+ * {@code MIN(field)} / {@code MAX(field)}. Anything not yet supported leaves the plan untouched so the local
+ * aggregate runs normally.
  */
 public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.ParameterizedOptimizerRule<
     AggregateExec,
@@ -82,13 +83,10 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         } else {
             return aggregateExec;
         }
-        // The remote aggregate runs over the rows the remote scan produces. A pushed filter/sort/limit on the
-        // same source would make the surviving plan and the remote disagree on the row set; keep it simple and
-        // bail out when any is present. (A pushed filter is itself fine to combine, but the source's pushedFilter
-        // is opaque here, so we conservatively refuse.)
-        if (ext.pushedFilter() != null
-            || ext.pushedExpressions().isEmpty() == false
-            || ext.pushedSort().isEmpty() == false
+        // The remote aggregate runs over the rows the remote scan produces. Pushed filters are safe because the
+        // connector renders them before STATS, but a pushed sort/limit on the same source would change the row set
+        // the aggregate sees relative to the surviving plan.
+        if (ext.pushedSort().isEmpty() == false
             || ext.pushedLimit() != FormatReader.NO_LIMIT
             || ext.pushedAggregates().isEmpty() == false) {
             return aggregateExec;

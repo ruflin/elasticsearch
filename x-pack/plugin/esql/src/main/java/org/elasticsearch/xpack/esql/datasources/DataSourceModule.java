@@ -343,17 +343,28 @@ public final class DataSourceModule implements Closeable {
 
         @Override
         public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
-            return resolveDelegate().resolveMetadata(location, credentials.decryptInPlace(config));
+            return resolveDelegate().resolveMetadata(location, connectorConfig(config));
         }
 
         @Override
         public void validateConfig(String location, Map<String, Object> config) {
-            resolveDelegate().validateConfig(location, credentials.decryptInPlace(config));
+            resolveDelegate().validateConfig(location, connectorConfig(config));
         }
 
         @Override
         public Connector open(Map<String, Object> config) {
-            return resolveDelegate().open(credentials.decryptInPlace(config));
+            return resolveDelegate().open(connectorConfig(config));
+        }
+
+        /**
+         * Flattens the {@code _datasource} sub-map (data-source connection settings forwarded by
+         * {@code DatasetRewriter} for a named data source) into the top level, then decrypts secret
+         * carriers, so a connector reads connection details and credentials as plain top-level keys.
+         * Mirrors the storage-provider path in {@code StorageProviderRegistry}; for inline {@code EXTERNAL}
+         * queries (no {@code _datasource}) the config is unchanged apart from decryption.
+         */
+        private Map<String, Object> connectorConfig(Map<String, Object> config) {
+            return credentials.decryptInPlace(ExternalSourceResolver.storageConfig(config));
         }
 
         @Override

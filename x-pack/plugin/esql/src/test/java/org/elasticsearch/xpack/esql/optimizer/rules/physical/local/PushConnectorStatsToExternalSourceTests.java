@@ -25,6 +25,7 @@ import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
+import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.Equals;
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
@@ -97,6 +98,29 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         PhysicalPlan result = applyRule(agg, true);
         ExternalSourceExec resultExt = (ExternalSourceExec) result;
         assertEquals("message", resultExt.pushedAggregates().get(0).field());
+    }
+
+    public void testCountStarPushedWithPushedFilter() {
+        Expression filter = new Equals(Source.EMPTY, MESSAGE, Literal.keyword(Source.EMPTY, "error"), null);
+        ExternalSourceExec ext = connectorSource().withPushedFilterAndExpressions("elasticsearch-where", List.of(filter));
+        AggregateExec agg = singleAggregate(ext, countStar());
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals("elasticsearch-where", resultExt.pushedFilter());
+        assertEquals(List.of(filter), resultExt.pushedExpressions());
+        assertEquals(1, resultExt.pushedAggregates().size());
+        assertEquals("COUNT", resultExt.pushedAggregates().get(0).function());
+    }
+
+    public void testNotPushedWithPushedLimit() {
+        AggregateExec agg = singleAggregate(connectorSource().withPushedLimit(10), countStar());
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(AggregateExec.class));
     }
 
     public void testNotPushedWhenConnectorDoesNotSupportAggregates() {

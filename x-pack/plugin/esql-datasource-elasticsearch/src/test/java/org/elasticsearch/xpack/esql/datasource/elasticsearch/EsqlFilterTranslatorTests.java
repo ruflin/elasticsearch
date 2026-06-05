@@ -27,6 +27,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.elasticsearch.xpack.esql.EsqlTestUtils.referenceAttribute;
+
 public class EsqlFilterTranslatorTests extends ESTestCase {
 
     private static FieldAttribute field(String name, DataType type) {
@@ -47,6 +49,11 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
 
     public void testEqualsOnKeyword() {
         Expression expr = new Equals(Source.EMPTY, field("status", DataType.KEYWORD), kw("active"), null);
+        assertEquals(Optional.of("`status` == \"active\""), EsqlFilterTranslator.toWhereClause(List.of(expr)));
+    }
+
+    public void testEqualsOnReferenceAttribute() {
+        Expression expr = new Equals(Source.EMPTY, referenceAttribute("status", DataType.KEYWORD), kw("active"), null);
         assertEquals(Optional.of("`status` == \"active\""), EsqlFilterTranslator.toWhereClause(List.of(expr)));
     }
 

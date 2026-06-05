@@ -15,6 +15,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
@@ -98,6 +99,23 @@ public class PushSortToExternalSourceTests extends ESTestCase {
         ExternalSourceExec resultExt = (ExternalSourceExec) ((TopNExec) result).child();
         assertTrue(resultExt.pushedSort().isEmpty());
         assertEquals(FormatReader.NO_LIMIT, resultExt.pushedLimit());
+    }
+
+    public void testSortPushedAfterAggregatePushdown() {
+        ExternalSourceExec ext = connectorSource().withPushedAggregate(
+            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(),
+            List.of(referenceAttribute("c", DataType.LONG)),
+            false
+        );
+        TopNExec topN = new TopNExec(Source.EMPTY, ext, List.of(order("c", false)), literal(5), null);
+
+        PhysicalPlan result = applyRule(topN, CONNECTOR_TYPE, true);
+
+        ExternalSourceExec resultExt = (ExternalSourceExec) ((TopNExec) result).child();
+        assertEquals(1, resultExt.pushedAggregates().size());
+        assertEquals(1, resultExt.pushedSort().size());
+        assertEquals(5, resultExt.pushedLimit());
     }
 
     public void testSortNotPushedWithoutExternalContext() {
