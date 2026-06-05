@@ -11,6 +11,7 @@ import org.elasticsearch.compute.aggregation.AggregatorMode;
 import org.elasticsearch.xpack.esql.core.expression.Alias;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
+import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -92,9 +93,19 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             || ext.pushedAggregates().isEmpty() == false) {
             return aggregateExec;
         }
-        // Step D scope: ungrouped only.
-        if (aggregateExec.groupings().isEmpty() == false) {
+        // This step supports ungrouped STATS and STATS ... BY a single plain-attribute key. Multiple keys and
+        // non-attribute groupings (e.g. BY bucket(...)) are out of scope and left for a later step.
+        List<? extends Expression> groupings = aggregateExec.groupings();
+        if (groupings.size() > 1) {
             return aggregateExec;
+        }
+        List<String> remoteGroupings = new ArrayList<>(groupings.size());
+        for (Expression grouping : groupings) {
+            Attribute groupAttribute = Expressions.attribute(grouping);
+            if (groupAttribute == null) {
+                return aggregateExec;
+            }
+            remoteGroupings.add(groupAttribute.name());
         }
 
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
@@ -105,8 +116,11 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
                     return aggregateExec;
                 }
                 remoteAggregates.add(remote);
+            } else if (isGroupingOutput(agg, groupings)) {
+                // The grouping key also appears in the aggregates as a bare attribute (it passes through to the
+                // output). It is rendered by the BY clause, not as an aggregate, so skip it here.
             } else {
-                // A bare grouping attribute or a non-aggregate expression: not in this step's scope.
+                // A non-aggregate, non-grouping expression: not in this step's scope.
                 return aggregateExec;
             }
         }
@@ -116,7 +130,22 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         // The source must produce exactly what the replaced aggregate node produced: its final output for SINGLE,
         // or its intermediate attributes for INITIAL (so the FINAL aggregate above consumes the right schema).
         List<Attribute> output = intermediate ? aggregateExec.intermediateAttributes() : aggregateExec.output();
-        return ext.withPushedAggregate(remoteAggregates, List.of(), output, intermediate);
+        return ext.withPushedAggregate(remoteAggregates, remoteGroupings, output, intermediate);
+    }
+
+    /** Whether {@code agg} is a bare reference to one of the grouping keys (so the connector renders it via BY). */
+    private static boolean isGroupingOutput(NamedExpression agg, List<? extends Expression> groupings) {
+        Attribute attribute = agg instanceof Alias alias ? Expressions.attribute(alias.child()) : Expressions.attribute(agg);
+        if (attribute == null) {
+            return false;
+        }
+        for (Expression grouping : groupings) {
+            Attribute groupAttribute = Expressions.attribute(grouping);
+            if (groupAttribute != null && groupAttribute.semanticEquals(attribute)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
