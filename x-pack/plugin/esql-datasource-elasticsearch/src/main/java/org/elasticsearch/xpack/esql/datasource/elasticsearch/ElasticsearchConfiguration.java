@@ -48,8 +48,13 @@ public class ElasticsearchConfiguration extends DataSourceConfiguration {
 
     @Override
     protected void validate(ValidationException errors) {
-        // api_key is optional (anonymous clusters need none) and any non-null string is accepted; the
-        // remote cluster validates it at query time. No cross-field constraints to check here.
+        // api_key is optional; anonymous clusters need none. When present, reject CRLF sequences to
+        // prevent HTTP header injection: the value is concatenated verbatim into an Authorization header
+        // and Apache HttpClient 4.5.x does not strip control characters from BasicHeader values.
+        String key = apiKey();
+        if (key != null && (key.indexOf('\r') >= 0 || key.indexOf('\n') >= 0)) {
+            errors.addValidationError("api_key must not contain line-break characters");
+        }
     }
 
     public String apiKey() {
