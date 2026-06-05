@@ -105,18 +105,44 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertThat(result, instanceOf(AggregateExec.class));
     }
 
-    public void testNotPushedForGroupedStats() {
+    public void testGroupedStatsSingleKeyPushedInitialMode() {
+        // STATS c = COUNT(*) BY message, INITIAL mode: the source emits the grouped intermediate state.
         ExternalSourceExec ext = connectorSource();
+        List<Attribute> intermediate = List.of(MESSAGE, referenceAttribute("c", DataType.LONG), referenceAttribute("c$seen", DataType.BOOLEAN));
         AggregateExec agg = new AggregateExec(
             Source.EMPTY,
             ext,
             List.of(MESSAGE),
             List.of(countStar(), MESSAGE),
-            AggregatorMode.SINGLE,
-            List.of(),
+            AggregatorMode.INITIAL,
+            intermediate,
             null
         );
-        // Step D scope is ungrouped only.
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals(List.of("message"), resultExt.pushedGroupings());
+        assertEquals(1, resultExt.pushedAggregates().size());
+        assertEquals("COUNT", resultExt.pushedAggregates().get(0).function());
+        assertTrue(resultExt.pushedAggregateIntermediate());
+        assertEquals(intermediate, resultExt.output());
+    }
+
+    public void testNotPushedForMultipleGroupingKeys() {
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute other = referenceAttribute("level", DataType.KEYWORD);
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(MESSAGE, other),
+            List.of(countStar(), MESSAGE, other),
+            AggregatorMode.INITIAL,
+            List.of(MESSAGE, other, referenceAttribute("c", DataType.LONG), referenceAttribute("c$seen", DataType.BOOLEAN)),
+            null
+        );
+        // Multiple BY keys are out of this step's scope.
         PhysicalPlan result = applyRule(agg, true);
         assertThat(result, instanceOf(AggregateExec.class));
     }

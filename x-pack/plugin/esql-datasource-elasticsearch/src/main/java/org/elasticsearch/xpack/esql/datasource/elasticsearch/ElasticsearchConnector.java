@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -58,10 +59,7 @@ class ElasticsearchConnector implements Connector {
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
         }
-        boolean intermediateAggregateState = request.aggregateIntermediateState()
-            && request.pushedAggregates() != null
-            && request.pushedAggregates().isEmpty() == false;
-        return parseResponse(response, request.blockFactory(), intermediateAggregateState);
+        return parseResponse(response, request);
     }
 
     /**
@@ -153,7 +151,8 @@ class ElasticsearchConnector implements Connector {
     }
 
     @SuppressWarnings("unchecked")
-    private ResultCursor parseResponse(Response response, BlockFactory blockFactory, boolean intermediateAggregateState) {
+    private ResultCursor parseResponse(Response response, QueryRequest request) {
+        BlockFactory blockFactory = request.blockFactory();
         Map<String, Object> body;
         try (
             InputStream content = response.getEntity().getContent();
@@ -179,39 +178,112 @@ class ElasticsearchConnector implements Connector {
             rowCount = Math.max(rowCount, ((List<Object>) columnObj).size());
         }
 
+        boolean intermediateAggregateState = request.aggregateIntermediateState()
+            && request.pushedAggregates() != null
+            && request.pushedAggregates().isEmpty() == false;
+        Block[] blocks = intermediateAggregateState
+            ? buildIntermediateAggregateBlocks(columns, columnValues, rowCount, blockFactory, request)
+            : buildPassthroughBlocks(columns, columnValues, rowCount, blockFactory);
+
+        Page page = rowCount == 0 ? null : new Page(rowCount, blocks);
+        return new SinglePageCursor(page);
+    }
+
+    /** Decodes each remote column to a block in response order (the result is the connector's output as-is). */
+    @SuppressWarnings("unchecked")
+    private static Block[] buildPassthroughBlocks(
+        List<EsqlTypeMapping.RemoteColumn> columns,
+        List<Object> columnValues,
+        int rowCount,
+        BlockFactory blockFactory
+    ) {
         List<Attribute> attributes = EsqlTypeMapping.toAttributes(columns);
-        // For a pushed aggregate planned as FINAL(INITIAL(source)), the source occupies the INITIAL position and
-        // must emit intermediate aggregator state: each aggregate's value block immediately followed by an
-        // all-true `seen` boolean block. The surviving FINAL aggregate then merges this single partial. The remote
-        // already returns the final value per aggregate (e.g. the global COUNT), so we only need to interleave the
-        // `seen` markers. Without intermediate state we return the remote columns as-is (final values).
-        int blockCount = intermediateAggregateState ? attributes.size() * 2 : attributes.size();
-        Block[] blocks = new Block[blockCount];
+        Block[] blocks = new Block[attributes.size()];
         boolean success = false;
         try {
             for (int col = 0; col < attributes.size(); col++) {
                 DataType type = attributes.get(col).dataType();
                 List<Object> values = col < columnValues.size() ? (List<Object>) columnValues.get(col) : List.of();
-                Block valueBlock = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
-                if (intermediateAggregateState) {
-                    blocks[col * 2] = valueBlock;
-                    blocks[col * 2 + 1] = blockFactory.newConstantBooleanBlockWith(true, rowCount);
-                } else {
-                    blocks[col] = valueBlock;
-                }
+                blocks[col] = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
             }
             success = true;
         } finally {
             if (success == false) {
-                for (Block block : blocks) {
-                    if (block != null) {
-                        block.close();
-                    }
-                }
+                releaseAll(blocks);
             }
         }
-        Page page = rowCount == 0 ? null : new Page(rowCount, blocks);
-        return new SinglePageCursor(page);
+        return blocks;
+    }
+
+    /**
+     * Builds the intermediate aggregator-state layout the {@code INITIAL} position of a {@code FINAL(INITIAL(source))}
+     * plan expects, so the surviving {@code FINAL} aggregate merges the connector's single partial. That layout is
+     * {@code [group key(s)..., per-aggregate (value, seen)...]} — grouping keys first, then for each aggregate a
+     * value block followed by an all-true {@code seen} boolean. The remote {@code STATS ... BY} response instead
+     * returns {@code [aggregate(s)..., group key(s)...]}, so we look columns up by name and reorder. All supported
+     * aggregates (COUNT, MIN, MAX) use the two-channel {@code [value, seen]} state, so a single {@code seen} per
+     * aggregate is correct.
+     */
+    @SuppressWarnings("unchecked")
+    private static Block[] buildIntermediateAggregateBlocks(
+        List<EsqlTypeMapping.RemoteColumn> columns,
+        List<Object> columnValues,
+        int rowCount,
+        BlockFactory blockFactory,
+        QueryRequest request
+    ) {
+        Map<String, Integer> columnIndexByName = new HashMap<>();
+        for (int i = 0; i < columns.size(); i++) {
+            columnIndexByName.put(columns.get(i).name(), i);
+        }
+        List<String> groupings = request.pushedGroupings();
+        List<RemoteAggregate> aggregates = request.pushedAggregates();
+        Block[] blocks = new Block[groupings.size() + aggregates.size() * 2];
+        boolean success = false;
+        try {
+            int out = 0;
+            // Grouping keys pass through as-is, in the order the planner expects them.
+            for (String grouping : groupings) {
+                blocks[out++] = decodeColumnByName(grouping, columnIndexByName, columns, columnValues, rowCount, blockFactory);
+            }
+            // Each aggregate becomes a (value, seen=true) pair.
+            for (RemoteAggregate aggregate : aggregates) {
+                blocks[out++] = decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
+                blocks[out++] = blockFactory.newConstantBooleanBlockWith(true, rowCount);
+            }
+            success = true;
+        } finally {
+            if (success == false) {
+                releaseAll(blocks);
+            }
+        }
+        return blocks;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Block decodeColumnByName(
+        String name,
+        Map<String, Integer> columnIndexByName,
+        List<EsqlTypeMapping.RemoteColumn> columns,
+        List<Object> columnValues,
+        int rowCount,
+        BlockFactory blockFactory
+    ) {
+        Integer index = columnIndexByName.get(name);
+        if (index == null) {
+            throw new IllegalStateException("Remote ES|QL response is missing expected column [" + name + "]");
+        }
+        DataType type = DataType.fromNameOrAlias(columns.get(index).type());
+        List<Object> values = index < columnValues.size() ? (List<Object>) columnValues.get(index) : List.of();
+        return EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
+    }
+
+    private static void releaseAll(Block[] blocks) {
+        for (Block block : blocks) {
+            if (block != null) {
+                block.close();
+            }
+        }
     }
 
     @Override
