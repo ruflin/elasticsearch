@@ -43,6 +43,19 @@ public interface ExternalSourceFactory {
     }
 
     /**
+     * Whether this factory's sources can apply a pushed {@code SORT} (paired with the row limit) remotely.
+     * <p>
+     * Only sources that natively understand ESQL sorting and execute it server-side — e.g. the elasticsearch
+     * connector, which renders the sort into the remote {@code _query} — should return {@code true}. File-based
+     * sources and connectors that stream rows in arrival order must return {@code false} (the default); for them
+     * the enclosing {@code TopNExec} does the sorting. A {@code true} here is a promise that, given the pushed
+     * sort and limit, the source returns the correct global top-N rows.
+     */
+    default boolean sortPushdownSupported() {
+        return false;
+    }
+
+    /**
      * Whether this factory resolves wildcard/multi-target patterns itself rather than via local glob
      * expansion over a {@link StorageProvider}.
      * <p>

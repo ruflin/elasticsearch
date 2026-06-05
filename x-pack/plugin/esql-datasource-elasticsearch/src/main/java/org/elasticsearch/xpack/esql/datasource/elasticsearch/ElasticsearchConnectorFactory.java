@@ -82,6 +82,13 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     @Override
+    public boolean sortPushdownSupported() {
+        // The remote source speaks ES|QL, so a pushed SORT is re-rendered into a remote SORT and applied
+        // server-side, returning the correct global top-N when paired with the pushed LIMIT.
+        return true;
+    }
+
+    @Override
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
         Endpoint endpoint = parseLocation(location);
         String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);

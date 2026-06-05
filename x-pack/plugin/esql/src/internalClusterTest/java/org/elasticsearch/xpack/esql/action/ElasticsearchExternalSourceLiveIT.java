@@ -32,6 +32,7 @@ import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_
 import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -93,9 +94,8 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         // A bounded, projected read returns exactly the requested number of rows with the requested columns,
-        // and every value decodes. NOTE: we intentionally do NOT add SORT ... | LIMIT and compare to a direct
-        // top-N — v1 pushes LIMIT but not the SORT, so the remote truncates to an arbitrary N before the local
-        // SORT runs, which yields a different sample than a globally-sorted top-N (a known v1 limitation).
+        // and every value decodes. This is the no-SORT case (an arbitrary page of `limit` matching rows); the
+        // globally-sorted top-N is covered separately by testSortPushdownMatchesDirectTopN.
         String tail = " | WHERE message IS NOT NULL | KEEP @timestamp, message | LIMIT 50";
         List<List<Object>> rows = runExternal(externalSource() + tail);
         assertThat(rows.size(), equalTo(50));
@@ -124,6 +124,37 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
         assertThat("filter matched at least one row", rows.isEmpty(), equalTo(false));
         for (List<Object> row : rows) {
             assertThat(String.valueOf(row.get(0)), equalTo(dataset));
+        }
+    }
+
+    public void testSortPushdownMatchesDirectTopN() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // With SORT pushdown, a SORT ... | LIMIT n over the connector renders into the remote _query, so the
+        // remote returns the correct global top-N rather than an arbitrary capped page. The connector result
+        // must therefore match the same top-N run directly against the cluster, in the same order.
+        int limit = 25;
+        String topN = " | SORT @timestamp DESC NULLS LAST | KEEP @timestamp | LIMIT " + limit;
+
+        List<List<Object>> viaConnector = runExternal(externalSource() + topN);
+        List<List<Object>> direct = directValues("FROM " + TARGET + topN);
+
+        assertThat(viaConnector.size(), equalTo(direct.size()));
+        // Both paths render the datetime @timestamp as an ISO-8601 string in the response; parse to an instant
+        // (epoch millis) so the comparison is independent of the exact string form.
+        for (int i = 0; i < viaConnector.size(); i++) {
+            long connectorMillis = epochMillis(viaConnector.get(i).get(0));
+            long directMillis = epochMillis(direct.get(i).get(0));
+            assertThat("row " + i + " timestamp matches direct top-N order", connectorMillis, equalTo(directMillis));
+        }
+        // Sanity: the sequence is actually descending (the remote SORT was applied, not arbitrary order).
+        for (int i = 1; i < viaConnector.size(); i++) {
+            assertThat(
+                "descending sort order",
+                epochMillis(viaConnector.get(i - 1).get(0)),
+                greaterThanOrEqualTo(epochMillis(viaConnector.get(i).get(0)))
+            );
         }
     }
 
@@ -184,5 +215,13 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
 
     private static String quote(String s) {
         return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** Normalizes a datetime cell (ISO-8601 string or numeric epoch millis) to epoch millis for comparison. */
+    private static long epochMillis(Object value) {
+        if (value instanceof Number n) {
+            return n.longValue();
+        }
+        return java.time.Instant.parse(String.valueOf(value)).toEpochMilli();
     }
 }

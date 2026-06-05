@@ -61,7 +61,8 @@ public record SourceOperatorContext(
     int parsingParallelism,
     int maxConcurrentOpenSegments,
     int maxRecordBytes,
-    int parallelism
+    int parallelism,
+    List<RemoteSort> pushedSort
 ) {
     /**
      * Single source of truth for the {@code max_concurrent_open_segments} default. Lives in this SPI (leaf)
@@ -78,6 +79,7 @@ public record SourceOperatorContext(
         config = config != null ? Map.copyOf(config) : Map.of();
         sourceMetadata = sourceMetadata != null ? Map.copyOf(sourceMetadata) : Map.of();
         pushedExpressions = pushedExpressions != null ? List.copyOf(pushedExpressions) : List.of();
+        pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
         schemaMap = schemaMap != null ? schemaMap : Map.of();
         partitionColumnNames = partitionColumnNames != null && partitionColumnNames.isEmpty() == false
             ? Collections.unmodifiableSet(new LinkedHashSet<>(partitionColumnNames))
@@ -136,7 +138,8 @@ public record SourceOperatorContext(
             1,
             DEFAULT_MAX_CONCURRENT_OPEN_SEGMENTS,
             SegmentableFormatReader.DEFAULT_MAX_RECORD_BYTES,
-            1
+            1,
+            List.of()
         );
     }
 
@@ -175,7 +178,8 @@ public record SourceOperatorContext(
             1,
             DEFAULT_MAX_CONCURRENT_OPEN_SEGMENTS,
             SegmentableFormatReader.DEFAULT_MAX_RECORD_BYTES,
-            1
+            1,
+            List.of()
         );
     }
 
@@ -213,7 +217,8 @@ public record SourceOperatorContext(
             1,
             DEFAULT_MAX_CONCURRENT_OPEN_SEGMENTS,
             SegmentableFormatReader.DEFAULT_MAX_RECORD_BYTES,
-            1
+            1,
+            List.of()
         );
     }
 
@@ -249,7 +254,8 @@ public record SourceOperatorContext(
             1,
             DEFAULT_MAX_CONCURRENT_OPEN_SEGMENTS,
             SegmentableFormatReader.DEFAULT_MAX_RECORD_BYTES,
-            1
+            1,
+            List.of()
         );
     }
 
@@ -283,6 +289,7 @@ public record SourceOperatorContext(
         // overrides it from the max_record_size query pragma.
         private int maxRecordBytes = SegmentableFormatReader.DEFAULT_MAX_RECORD_BYTES;
         private int parallelism = 1;
+        private List<RemoteSort> pushedSort;
 
         public Builder sourceType(String sourceType) {
             this.sourceType = sourceType;
@@ -405,6 +412,11 @@ public record SourceOperatorContext(
             return this;
         }
 
+        public Builder pushedSort(List<RemoteSort> pushedSort) {
+            this.pushedSort = pushedSort;
+            return this;
+        }
+
         public SourceOperatorContext build() {
             return new SourceOperatorContext(
                 sourceType,
@@ -428,7 +440,8 @@ public record SourceOperatorContext(
                 parsingParallelism,
                 maxConcurrentOpenSegments,
                 maxRecordBytes,
-                parallelism
+                parallelism,
+                pushedSort
             );
         }
     }

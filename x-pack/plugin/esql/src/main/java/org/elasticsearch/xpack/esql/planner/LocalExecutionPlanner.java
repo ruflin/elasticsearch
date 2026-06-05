@@ -123,6 +123,7 @@ import org.elasticsearch.xpack.esql.datasources.PartitionMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.ColumnExtractor;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceOperatorContext;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.enrich.EnrichLookupOperator;
@@ -1694,6 +1695,11 @@ public class LocalExecutionPlanner {
             }
         }
 
+        // Project the pushed Order list to the SPI-level RemoteSort (field/direction/nulls). Only sort keys that
+        // resolve to a single attribute survive; anything else (expression sorts) is dropped here and the enclosing
+        // TopNExec safety net does the sorting. The connector consumes these to render a remote SORT.
+        List<RemoteSort> pushedSort = toRemoteSort(externalSource.pushedSort());
+
         SourceOperatorContext operatorContext = SourceOperatorContext.builder()
             .sourceType(externalSource.sourceType())
             .path(path)
@@ -1708,6 +1714,7 @@ public class LocalExecutionPlanner {
             .sourceMetadata(externalSource.sourceMetadata())
             .pushedFilter(externalSource.pushedFilter())
             .pushedExpressions(externalSource.pushedExpressions())
+            .pushedSort(pushedSort)
             .fileList(fileList)
             .schemaMap(externalSource.schemaMap())
             .partitionColumnNames(virtualColumnNames)
@@ -1721,6 +1728,34 @@ public class LocalExecutionPlanner {
         SourceOperator.SourceOperatorFactory factory = operatorFactoryRegistry.factory(operatorContext);
         context.driverParallelism(new DriverParallelism(DriverParallelism.Type.DATA_PARALLELISM, instanceCount));
         return PhysicalOperation.fromSource(factory, layout.build());
+    }
+
+    /**
+     * Projects a pushed {@link Order} list to the SPI-level {@link RemoteSort}. A sort key is only forwarded when it
+     * resolves to a single named attribute; expression sorts (e.g. {@code SORT length(name)}) are dropped so the
+     * enclosing {@code TopNExec} safety net handles them. If any key cannot be projected the whole list is dropped
+     * to keep the pushed sort all-or-nothing: a connector applying a partial SORT plus the pushed LIMIT could return
+     * a wrong top-N, whereas dropping defers entirely to the local TopN.
+     */
+    private static List<RemoteSort> toRemoteSort(List<Order> orders) {
+        if (orders.isEmpty()) {
+            return List.of();
+        }
+        List<RemoteSort> remote = new ArrayList<>(orders.size());
+        for (Order order : orders) {
+            Attribute attr = Expressions.attribute(order.child());
+            if (attr == null) {
+                return List.of();
+            }
+            remote.add(
+                new RemoteSort(
+                    attr.name(),
+                    order.direction() == Order.OrderDirection.ASC,
+                    order.nullsPosition() == Order.NullsPosition.FIRST
+                )
+            );
+        }
+        return remote;
     }
 
     private PhysicalOperation planShow(ShowExec showExec) {
