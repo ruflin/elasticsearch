@@ -89,6 +89,13 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     @Override
+    public boolean aggregatePushdownSupported() {
+        // The remote source speaks ES|QL, so a pushed STATS is re-rendered into a remote STATS and computed
+        // server-side, returning the final grouped result rows (no local re-aggregation needed).
+        return true;
+    }
+
+    @Override
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
         Endpoint endpoint = parseLocation(location);
         String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);

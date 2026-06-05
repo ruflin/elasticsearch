@@ -95,6 +95,9 @@ public class OperatorFactoryRegistry {
                     context.rowLimit(),
                     context.pushedExpressions(),
                     context.pushedSort(),
+                    context.pushedAggregates(),
+                    context.pushedGroupings(),
+                    context.aggregateIntermediateState(),
                     null
                 );
                 return new AsyncConnectorSourceOperatorFactory(connector, request, context.maxBufferSize(), executor, context.sliceQueue());

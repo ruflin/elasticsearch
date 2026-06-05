@@ -1,0 +1,149 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
+ */
+
+package org.elasticsearch.xpack.esql.optimizer.rules.physical.local;
+
+import org.elasticsearch.compute.aggregation.AggregatorMode;
+import org.elasticsearch.xpack.esql.core.expression.Alias;
+import org.elasticsearch.xpack.esql.core.expression.Attribute;
+import org.elasticsearch.xpack.esql.core.expression.Expression;
+import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
+import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.AggregateFunction;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
+import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
+import org.elasticsearch.xpack.esql.optimizer.PhysicalOptimizerRules;
+import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
+import org.elasticsearch.xpack.esql.plan.physical.ExternalSourceExec;
+import org.elasticsearch.xpack.esql.plan.physical.PhysicalPlan;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Pushes a {@code STATS} aggregation directly over an {@link ExternalSourceExec} into the source for connector
+ * sources that compute the aggregate remotely and return the final result rows (see
+ * {@link ExternalSourceFactory#aggregatePushdownSupported()}). The elasticsearch connector renders the aggregate
+ * into the remote {@code _query}, so the remote cluster runs the whole {@code STATS} and returns one final row per
+ * group.
+ *
+ * <p>Unlike filter / limit / sort pushdown, this rule does not keep a plain local aggregate as a safety net: a
+ * connector aggregate returns already-computed results, so a local aggregate re-reading the source rows would
+ * double-count. Instead it pushes into the position the aggregate occupied and rewrites the source output to that
+ * position's contract:
+ * <ul>
+ *   <li>{@code SINGLE}: the rule <b>removes</b> the aggregate and the source emits final values directly (output
+ *       = the aggregate's final output).</li>
+ *   <li>{@code INITIAL}: external-source STATS is planned as {@code FINAL(INITIAL(source))}. The rule replaces the
+ *       {@code INITIAL} aggregate with the source and asks it to emit <b>intermediate</b> aggregator state
+ *       ({@code [value, seen]} per aggregate, output = {@link AggregateExec#intermediateAttributes()}); the
+ *       surviving {@code FINAL} aggregate merges that single partial into the correct final result.</li>
+ * </ul>
+ * {@code FINAL} is never matched here because a FINAL aggregate's child is the INITIAL aggregate, not the source.
+ *
+ * <p>The rule bails out when the source already carries pushed scan predicates, a pushed sort, or a pushed limit
+ * (which would change the row set the remote aggregates over relative to what the surviving plan expects).
+ *
+ * <p>This step supports ungrouped {@code COUNT(*)} / {@code COUNT(field)}. Other functions and {@code BY}
+ * groupings are added incrementally; anything not yet supported leaves the plan untouched so the local aggregate
+ * runs normally.
+ */
+public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.ParameterizedOptimizerRule<
+    AggregateExec,
+    LocalPhysicalOptimizerContext> {
+
+    @Override
+    protected PhysicalPlan rule(AggregateExec aggregateExec, LocalPhysicalOptimizerContext ctx) {
+        if (aggregateExec.child() instanceof ExternalSourceExec == false) {
+            return aggregateExec;
+        }
+        ExternalSourceExec ext = (ExternalSourceExec) aggregateExec.child();
+        if (aggregatePushdownSupported(ext.sourceType(), ctx) == false) {
+            return aggregateExec;
+        }
+        // SINGLE -> remove the aggregate, source emits final values.
+        // INITIAL -> replace this aggregate, source emits intermediate state for the surviving FINAL to merge.
+        // FINAL (and any other mode) -> its child is never the source, so leave it untouched.
+        AggregatorMode mode = aggregateExec.getMode();
+        boolean intermediate;
+        if (mode == AggregatorMode.SINGLE) {
+            intermediate = false;
+        } else if (mode == AggregatorMode.INITIAL) {
+            intermediate = true;
+        } else {
+            return aggregateExec;
+        }
+        // The remote aggregate runs over the rows the remote scan produces. A pushed filter/sort/limit on the
+        // same source would make the surviving plan and the remote disagree on the row set; keep it simple and
+        // bail out when any is present. (A pushed filter is itself fine to combine, but the source's pushedFilter
+        // is opaque here, so we conservatively refuse.)
+        if (ext.pushedFilter() != null
+            || ext.pushedExpressions().isEmpty() == false
+            || ext.pushedSort().isEmpty() == false
+            || ext.pushedLimit() != FormatReader.NO_LIMIT
+            || ext.pushedAggregates().isEmpty() == false) {
+            return aggregateExec;
+        }
+        // Step D scope: ungrouped only.
+        if (aggregateExec.groupings().isEmpty() == false) {
+            return aggregateExec;
+        }
+
+        List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
+        for (NamedExpression agg : aggregateExec.aggregates()) {
+            if (agg instanceof Alias alias && alias.child() instanceof AggregateFunction fn) {
+                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn);
+                if (remote == null) {
+                    return aggregateExec;
+                }
+                remoteAggregates.add(remote);
+            } else {
+                // A bare grouping attribute or a non-aggregate expression: not in this step's scope.
+                return aggregateExec;
+            }
+        }
+        if (remoteAggregates.isEmpty()) {
+            return aggregateExec;
+        }
+        // The source must produce exactly what the replaced aggregate node produced: its final output for SINGLE,
+        // or its intermediate attributes for INITIAL (so the FINAL aggregate above consumes the right schema).
+        List<Attribute> output = intermediate ? aggregateExec.intermediateAttributes() : aggregateExec.output();
+        return ext.withPushedAggregate(remoteAggregates, List.of(), output, intermediate);
+    }
+
+    /**
+     * Projects a supported aggregate function to its {@link RemoteAggregate}, or {@code null} when the function is
+     * outside this step's scope (which leaves the plan untouched).
+     */
+    private static RemoteAggregate toRemoteAggregate(String outputName, AggregateFunction fn) {
+        if (fn instanceof Count count) {
+            if (count.hasFilter()) {
+                return null;
+            }
+            Expression field = count.field();
+            if (field.foldable()) {
+                // COUNT(*) / COUNT(<literal>): no input field.
+                return new RemoteAggregate(outputName, "COUNT", null);
+            }
+            if (field instanceof Attribute attr) {
+                return new RemoteAggregate(outputName, "COUNT", attr.name());
+            }
+            return null;
+        }
+        return null;
+    }
+
+    private static boolean aggregatePushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {
+        if (ctx.external() == null || sourceType == null) {
+            return false;
+        }
+        ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
+        return factory != null && factory.aggregatePushdownSupported();
+    }
+}

@@ -20,6 +20,7 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
@@ -57,7 +58,10 @@ class ElasticsearchConnector implements Connector {
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
         }
-        return parseResponse(response, request.blockFactory());
+        boolean intermediateAggregateState = request.aggregateIntermediateState()
+            && request.pushedAggregates() != null
+            && request.pushedAggregates().isEmpty() == false;
+        return parseResponse(response, request.blockFactory(), intermediateAggregateState);
     }
 
     /**
@@ -80,6 +84,13 @@ class ElasticsearchConnector implements Connector {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
+        // A pushed aggregate replaces row materialization entirely: render STATS and return the final grouped
+        // rows. The projection/sort/limit are not applied — the aggregate output is the result schema.
+        List<RemoteAggregate> aggregates = request.pushedAggregates();
+        if (aggregates != null && aggregates.isEmpty() == false) {
+            appendStats(query, aggregates, request.pushedGroupings());
+            return query.toString();
+        }
         // Sort remotely so a paired LIMIT returns the correct global top-N. Before KEEP so a sort key the
         // projection drops is still present when the remote sorts.
         List<RemoteSort> sort = request.pushedSort();
@@ -114,8 +125,35 @@ class ElasticsearchConnector implements Connector {
         return query.toString();
     }
 
+    /**
+     * Renders {@code | STATS out = FN(field), ... [BY key, ...]} for a pushed aggregate. Output names, fields,
+     * and group keys are backtick-quoted; argument-less aggregates (a null field, e.g. {@code COUNT(*)}) render
+     * as {@code FN(*)}.
+     */
+    private static void appendStats(StringBuilder query, List<RemoteAggregate> aggregates, List<String> groupings) {
+        query.append(" | STATS ");
+        for (int i = 0; i < aggregates.size(); i++) {
+            if (i > 0) {
+                query.append(", ");
+            }
+            RemoteAggregate agg = aggregates.get(i);
+            query.append(EsqlIdentifiers.quote(agg.outputName())).append(" = ").append(agg.function()).append('(');
+            query.append(agg.field() == null ? "*" : EsqlIdentifiers.quote(agg.field()));
+            query.append(')');
+        }
+        if (groupings != null && groupings.isEmpty() == false) {
+            query.append(" BY ");
+            for (int i = 0; i < groupings.size(); i++) {
+                if (i > 0) {
+                    query.append(", ");
+                }
+                query.append(EsqlIdentifiers.quote(groupings.get(i)));
+            }
+        }
+    }
+
     @SuppressWarnings("unchecked")
-    private ResultCursor parseResponse(Response response, BlockFactory blockFactory) {
+    private ResultCursor parseResponse(Response response, BlockFactory blockFactory, boolean intermediateAggregateState) {
         Map<String, Object> body;
         try (
             InputStream content = response.getEntity().getContent();
@@ -142,13 +180,25 @@ class ElasticsearchConnector implements Connector {
         }
 
         List<Attribute> attributes = EsqlTypeMapping.toAttributes(columns);
-        Block[] blocks = new Block[attributes.size()];
+        // For a pushed aggregate planned as FINAL(INITIAL(source)), the source occupies the INITIAL position and
+        // must emit intermediate aggregator state: each aggregate's value block immediately followed by an
+        // all-true `seen` boolean block. The surviving FINAL aggregate then merges this single partial. The remote
+        // already returns the final value per aggregate (e.g. the global COUNT), so we only need to interleave the
+        // `seen` markers. Without intermediate state we return the remote columns as-is (final values).
+        int blockCount = intermediateAggregateState ? attributes.size() * 2 : attributes.size();
+        Block[] blocks = new Block[blockCount];
         boolean success = false;
         try {
             for (int col = 0; col < attributes.size(); col++) {
                 DataType type = attributes.get(col).dataType();
                 List<Object> values = col < columnValues.size() ? (List<Object>) columnValues.get(col) : List.of();
-                blocks[col] = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
+                Block valueBlock = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
+                if (intermediateAggregateState) {
+                    blocks[col * 2] = valueBlock;
+                    blocks[col * 2 + 1] = blockFactory.newConstantBooleanBlockWith(true, rowCount);
+                } else {
+                    blocks[col] = valueBlock;
+                }
             }
             success = true;
         } finally {

@@ -15,6 +15,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.type.EsField;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 
@@ -136,6 +137,9 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             FormatNoLimit.VALUE,
             List.of(filter),
             List.of(),
+            List.of(),
+            List.of(),
+            false,
             null
         );
         assertEquals("FROM logs | WHERE `count` > 10 | KEEP `count`", ElasticsearchConnector.buildRemoteQuery(request));
@@ -148,7 +152,20 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
-        var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, 3, List.of(filter), List.of(), null);
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            3,
+            List.of(filter),
+            List.of(),
+            List.of(),
+            List.of(),
+            false,
+            null
+        );
         assertEquals("FROM logs | WHERE `count` > 10 | LIMIT 3", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
@@ -162,10 +179,53 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             5,
             List.of(),
             List.of(new RemoteSort("@timestamp", false, false), new RemoteSort("message", true, true)),
+            List.of(),
+            List.of(),
+            false,
             null
         );
         assertEquals(
             "FROM logs | SORT `@timestamp` DESC NULLS LAST, `message` ASC NULLS FIRST | KEEP `message` | LIMIT 5",
+            ElasticsearchConnector.buildRemoteQuery(request)
+        );
+    }
+
+    public void testBuildRemoteQueryPushesUngroupedStats() {
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            5,
+            List.of(),
+            List.of(),
+            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(),
+            false,
+            null
+        );
+        // STATS replaces projection/sort/limit; the aggregate output is the result schema.
+        assertEquals("FROM logs | STATS `c` = COUNT(*)", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesStatsWithFieldAndGrouping() {
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            FormatNoLimit.VALUE,
+            List.of(),
+            List.of(),
+            List.of(new RemoteAggregate("c", "COUNT", null), new RemoteAggregate("mx", "MAX", "bytes")),
+            List.of("data_stream.type"),
+            false,
+            null
+        );
+        assertEquals(
+            "FROM logs | STATS `c` = COUNT(*), `mx` = MAX(`bytes`) BY `data_stream.type`",
             ElasticsearchConnector.buildRemoteQuery(request)
         );
     }
