@@ -33,11 +33,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Objects;
 
 /**
  * Live connection to a remote Elasticsearch cluster. Runs an ES|QL query against the remote
- * {@code _query} API over HTTP and streams the columnar response back as ES|QL {@link Page}s.
+ * {@code _query} API over HTTP and materializes the columnar response into ES|QL {@link Page}s.
  * <p>
  * v1 executes the whole query in a single round-trip and returns a single-page cursor. Pagination
  * and aggregation pushdown are deferred to later phases.
@@ -164,29 +163,38 @@ class ElasticsearchConnector implements Connector {
     @SuppressWarnings("unchecked")
     private ResultCursor parseResponse(Response response, QueryRequest request) {
         BlockFactory blockFactory = request.blockFactory();
-        Map<String, Object> body;
+        List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
+        // columnar=true => values is an array of columns, each an array of row values.
+        List<List<Object>> columnValues = new ArrayList<>();
         try (
             InputStream content = response.getEntity().getContent();
             XContentParser parser = JsonXContent.jsonXContent.createParser(XContentParserConfiguration.EMPTY, content)
         ) {
-            body = parser.map();
+            parser.nextToken(); // START_OBJECT
+            while (parser.nextToken() == XContentParser.Token.FIELD_NAME) {
+                String field = parser.currentName();
+                parser.nextToken(); // move to field value
+                if ("columns".equals(field)) {
+                    EsqlTypeMapping.parseColumns(parser, columns);
+                } else if ("values".equals(field)) {
+                    while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
+                        List<Object> colValues = new ArrayList<>();
+                        while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
+                            colValues.add(readScalar(parser));
+                        }
+                        columnValues.add(colValues);
+                    }
+                } else {
+                    parser.skipChildren();
+                }
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to parse remote ES|QL response", e);
         }
 
-        List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
-        for (Object columnObj : (List<Object>) body.getOrDefault("columns", List.of())) {
-            Map<String, Object> column = (Map<String, Object>) columnObj;
-            columns.add(
-                new EsqlTypeMapping.RemoteColumn(Objects.toString(column.get("name"), null), Objects.toString(column.get("type"), null))
-            );
-        }
-
-        // columnar=true => values is an array of columns, each an array of row values.
-        List<Object> columnValues = (List<Object>) body.getOrDefault("values", List.of());
         int rowCount = 0;
-        for (Object columnObj : columnValues) {
-            rowCount = Math.max(rowCount, ((List<Object>) columnObj).size());
+        for (List<Object> col : columnValues) {
+            rowCount = Math.max(rowCount, col.size());
         }
 
         boolean intermediateAggregateState = request.aggregateIntermediateState()
@@ -201,10 +209,9 @@ class ElasticsearchConnector implements Connector {
     }
 
     /** Decodes each remote column to a block in response order (the result is the connector's output as-is). */
-    @SuppressWarnings("unchecked")
     private static Block[] buildPassthroughBlocks(
         List<EsqlTypeMapping.RemoteColumn> columns,
-        List<Object> columnValues,
+        List<List<Object>> columnValues,
         int rowCount,
         BlockFactory blockFactory
     ) {
@@ -214,7 +221,7 @@ class ElasticsearchConnector implements Connector {
         try {
             for (int col = 0; col < attributes.size(); col++) {
                 DataType type = attributes.get(col).dataType();
-                List<Object> values = col < columnValues.size() ? (List<Object>) columnValues.get(col) : List.of();
+                List<Object> values = col < columnValues.size() ? columnValues.get(col) : List.of();
                 blocks[col] = EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
             }
             success = true;
@@ -235,10 +242,9 @@ class ElasticsearchConnector implements Connector {
      * aggregates (COUNT, MIN, MAX) use the two-channel {@code [value, seen]} state, so a single {@code seen} per
      * aggregate is correct.
      */
-    @SuppressWarnings("unchecked")
     private static Block[] buildIntermediateAggregateBlocks(
         List<EsqlTypeMapping.RemoteColumn> columns,
-        List<Object> columnValues,
+        List<List<Object>> columnValues,
         int rowCount,
         BlockFactory blockFactory,
         QueryRequest request
@@ -278,12 +284,11 @@ class ElasticsearchConnector implements Connector {
         return blocks;
     }
 
-    @SuppressWarnings("unchecked")
     private static Block decodeColumnByName(
         String name,
         Map<String, Integer> columnIndexByName,
         List<EsqlTypeMapping.RemoteColumn> columns,
-        List<Object> columnValues,
+        List<List<Object>> columnValues,
         int rowCount,
         BlockFactory blockFactory
     ) {
@@ -292,8 +297,26 @@ class ElasticsearchConnector implements Connector {
             throw new IllegalStateException("Remote ES|QL response is missing expected column [" + name + "]");
         }
         DataType type = DataType.fromNameOrAlias(columns.get(index).type());
-        List<Object> values = index < columnValues.size() ? (List<Object>) columnValues.get(index) : List.of();
+        List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
         return EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
+    }
+
+    /**
+     * Reads a single scalar JSON value at the parser's current token. Nested objects/arrays are
+     * skipped and reported as {@code null} — ES|QL columnar values are always scalars, so this
+     * only happens on a malformed or future-version response.
+     */
+    private static Object readScalar(XContentParser parser) throws IOException {
+        return switch (parser.currentToken()) {
+            case VALUE_NULL -> null;
+            case VALUE_STRING -> parser.text();
+            case VALUE_NUMBER -> parser.numberValue();
+            case VALUE_BOOLEAN -> parser.booleanValue();
+            default -> {
+                parser.skipChildren();
+                yield null;
+            }
+        };
     }
 
     private static void releaseAll(Block[] blocks) {

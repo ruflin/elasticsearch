@@ -27,7 +27,9 @@ import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -154,27 +156,12 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
             InputStream content = response.getEntity().getContent();
             XContentParser parser = JsonXContent.jsonXContent.createParser(XContentParserConfiguration.EMPTY, content)
         ) {
-            parser.nextToken();
+            parser.nextToken(); // START_OBJECT
             XContentParser.Token token;
             while ((token = parser.nextToken()) != null) {
                 if (token == XContentParser.Token.FIELD_NAME && "columns".equals(parser.currentName())) {
                     parser.nextToken(); // START_ARRAY
-                    while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-                        String name = null;
-                        String type = null;
-                        while (parser.nextToken() == XContentParser.Token.FIELD_NAME) {
-                            String field = parser.currentName();
-                            parser.nextToken();
-                            if ("name".equals(field)) {
-                                name = parser.text();
-                            } else if ("type".equals(field)) {
-                                type = parser.text();
-                            } else {
-                                parser.skipChildren();
-                            }
-                        }
-                        columns.add(new EsqlTypeMapping.RemoteColumn(name, type));
-                    }
+                    EsqlTypeMapping.parseColumns(parser, columns);
                 } else if (token == XContentParser.Token.START_OBJECT || token == XContentParser.Token.START_ARRAY) {
                     parser.skipChildren();
                 }
@@ -207,6 +194,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
                 "Invalid Elasticsearch location [" + location + "]: user info is not supported; use api_key config instead"
             );
         }
+        rejectPrivateHost(host, location);
         String path = uri.getPath();
         if (path == null || path.length() <= 1) {
             throw new IllegalArgumentException("Invalid Elasticsearch location [" + location + "]: missing index in path");
@@ -220,6 +208,39 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
             baseUrl.append(':').append(DEFAULT_PORT);
         }
         return new Endpoint(baseUrl.toString(), target);
+    }
+
+    /**
+     * Rejects IP-literal hosts in the link-local range (169.254.0.0/16, fe80::/10), which is used
+     * by cloud-provider instance metadata services (AWS, GCP, and Azure all serve credentials at
+     * 169.254.169.254). Allowing those addresses would let an admin-registered data source silently
+     * exfiltrate instance credentials at query time.
+     * <p>
+     * Loopback and RFC-1918 private ranges are intentionally allowed: connecting to a local or
+     * network-internal Elasticsearch cluster is a legitimate use case. Link-local is the one range
+     * that has no legitimate ES endpoint but is universally reachable on cloud hosts.
+     * <p>
+     * Only literal IP addresses are checked; hostnames are allowed through because resolving them here
+     * would require a DNS round-trip at dataset-registration time.
+     */
+    private static void rejectPrivateHost(String host, String location) {
+        // Only check literal IP addresses (IPv4: digits-and-dots; IPv6: contains a colon).
+        boolean isIpLiteral = host.matches("\\d+\\.\\d+\\.\\d+\\.\\d+.*") || host.contains(":");
+        if (isIpLiteral == false) {
+            return;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(host);
+            if (addr.isLinkLocalAddress()) {
+                throw new IllegalArgumentException(
+                    "Invalid Elasticsearch location ["
+                        + location
+                        + "]: link-local addresses are not allowed (they map to cloud metadata services)"
+                );
+            }
+        } catch (UnknownHostException e) {
+            // Malformed IP literal — connection will fail at query time with a clear error.
+        }
     }
 
     record Endpoint(String baseUrl, String target) {}

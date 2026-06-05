@@ -10,12 +10,14 @@ package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
+import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Nullability;
 import org.elasticsearch.xpack.esql.core.expression.ReferenceAttribute;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,6 +57,33 @@ final class EsqlTypeMapping {
 
     /** A column descriptor from a remote {@code _query} response. */
     record RemoteColumn(String name, String type) {}
+
+    /**
+     * Parses the {@code columns} array from a remote {@code _query} response, appending each column
+     * descriptor to {@code out}. The parser must be positioned at the {@code START_ARRAY} token for
+     * the columns array on entry; it will be positioned past the matching {@code END_ARRAY} on exit.
+     * <p>
+     * Shared between schema-resolution (which issues a {@code LIMIT 0} probe and only reads columns)
+     * and response-parsing (which reads both columns and values in a single streaming pass).
+     */
+    static void parseColumns(XContentParser parser, List<RemoteColumn> out) throws IOException {
+        while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
+            String name = null;
+            String type = null;
+            while (parser.nextToken() == XContentParser.Token.FIELD_NAME) {
+                String field = parser.currentName();
+                parser.nextToken();
+                if ("name".equals(field)) {
+                    name = parser.text();
+                } else if ("type".equals(field)) {
+                    type = parser.text();
+                } else {
+                    parser.skipChildren();
+                }
+            }
+            out.add(new RemoteColumn(name, type));
+        }
+    }
 
     /**
      * Converts one column of a columnar {@code _query} response into an ES|QL {@link Block}.
