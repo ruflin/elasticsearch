@@ -39,9 +39,9 @@ import java.util.Set;
  * location URIs of the form {@code es://host:port/index}.
  * <p>
  * Schema resolution runs {@code FROM <index> | LIMIT 0} against the remote {@code _query} API so the
- * resolved schema matches exactly what a real query returns. The remote endpoint, target index, and
- * (optional) API key are stored in the resolved config and handed back to {@link #open} at execution
- * time.
+ * resolved schema matches exactly what a real query returns. The remote endpoint and target index are stored in
+ * the resolved config and handed back to {@link #open} at execution time; credentials stay in the original query
+ * config so encrypted data-source secrets are not copied into resolved metadata as plaintext.
  */
 class ElasticsearchConnectorFactory implements ConnectorFactory {
 
@@ -91,7 +91,8 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     @Override
     public boolean aggregatePushdownSupported() {
         // The remote source speaks ES|QL, so a pushed STATS is re-rendered into a remote STATS and computed
-        // server-side, returning the final grouped result rows (no local re-aggregation needed).
+        // server-side. The connector can return either final rows or intermediate state, depending on the
+        // aggregate mode the optimizer pushed.
         return true;
     }
 
@@ -104,9 +105,6 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
             Map<String, Object> resolvedConfig = new HashMap<>();
             resolvedConfig.put(CONFIG_ENDPOINT, endpoint.baseUrl());
             resolvedConfig.put(CONFIG_TARGET, endpoint.target());
-            if (apiKey != null) {
-                resolvedConfig.put(CONFIG_API_KEY, apiKey);
-            }
             return new SimpleSourceMetadata(attributes, type(), location, null, null, null, resolvedConfig);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to resolve schema for remote Elasticsearch [" + location + "]", e);

@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.optimizer.rules.physical.local;
 
 import org.elasticsearch.xpack.esql.core.expression.Expression;
+import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -28,9 +29,8 @@ import java.util.List;
  * an arbitrary page.
  *
  * <p>The {@link TopNExec} is <em>not</em> removed: it stays as the correctness safety net. If the source
- * under- or over-applies the sort (or drops it entirely, e.g. when a key is an expression rather than a plain
- * attribute — see {@code LocalExecutionPlanner#toRemoteSort}), the local Top-N still produces the right answer;
- * the pushdown only reduces how much data crosses the wire.
+ * under- or over-applies the sort, the local Top-N still produces the right answer; the pushdown only reduces how
+ * much data crosses the wire.
  *
  * <p>Conditions for the rule to fire:
  * <ul>
@@ -38,6 +38,7 @@ import java.util.List;
  *   <li>The source has not already been annotated with a pushed sort.</li>
  *   <li>The source type's {@link ExternalSourceFactory} reports {@link ExternalSourceFactory#sortPushdownSupported()}.</li>
  *   <li>The limit is a non-negative integer literal.</li>
+ *   <li>Every sort key resolves to a plain attribute.</li>
  * </ul>
  *
  * <p>Distinct from {@link PushTopNIntoExternalSource}, which annotates a {@code BlockHash} Top-N pruning hint for
@@ -62,6 +63,9 @@ public class PushSortToExternalSource extends PhysicalOptimizerRules.Parameteriz
             if (orders.isEmpty()) {
                 return topNExec;
             }
+            if (canPushAllSortKeys(orders) == false) {
+                return topNExec;
+            }
             // Set the limit too so the remote SORT is paired with a LIMIT and returns the top-N, not the whole
             // sorted set. The enclosing TopNExec stays as the safety net.
             ExternalSourceExec annotated = ext.withPushedSort(orders).withPushedLimit(limit);
@@ -76,6 +80,15 @@ public class PushSortToExternalSource extends PhysicalOptimizerRules.Parameteriz
         }
         ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
         return factory != null && factory.sortPushdownSupported();
+    }
+
+    private static boolean canPushAllSortKeys(List<Order> orders) {
+        for (Order order : orders) {
+            if (Expressions.attribute(order.child()) == null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

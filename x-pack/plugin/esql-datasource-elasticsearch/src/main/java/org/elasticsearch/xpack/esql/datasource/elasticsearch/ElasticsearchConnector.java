@@ -57,7 +57,7 @@ class ElasticsearchConnector implements Connector {
         try {
             response = client.performRequest(RemoteQuery.request(esqlQuery));
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
+            throw new UncheckedIOException("Failed to run remote ES|QL query", e);
         }
         return parseResponse(response, request);
     }

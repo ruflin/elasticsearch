@@ -107,6 +107,12 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
         assertEquals(Optional.of("`name` == \"a\\\"b\""), EsqlFilterTranslator.toWhereClause(List.of(expr)));
     }
 
+    public void testStringWithControlCharacterIsNotPushed() {
+        Expression expr = new Equals(Source.EMPTY, field("name", DataType.KEYWORD), kw("a\nb"), null);
+        assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(expr)));
+        assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(expr));
+    }
+
     public void testFieldNameWithDotsIsQuoted() {
         Expression expr = new Equals(Source.EMPTY, field("user.name", DataType.KEYWORD), kw("bob"), null);
         assertEquals(Optional.of("`user.name` == \"bob\""), EsqlFilterTranslator.toWhereClause(List.of(expr)));

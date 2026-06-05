@@ -184,7 +184,7 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
             return Optional.empty();
         }
         return switch (type) {
-            case KEYWORD, TEXT -> Optional.of(quoteString(bytesRefToString(value)));
+            case KEYWORD, TEXT -> quoteString(bytesRefToString(value));
             case BOOLEAN -> Optional.of(Boolean.TRUE.equals(value) ? "true" : "false");
             case INTEGER, LONG, DOUBLE -> Optional.of(value.toString());
             default -> Optional.empty();
@@ -195,7 +195,12 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         return value instanceof BytesRef br ? br.utf8ToString() : value.toString();
     }
 
-    private static String quoteString(String value) {
-        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    private static Optional<String> quoteString(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            if (Character.isISOControl(value.charAt(i))) {
+                return Optional.empty();
+            }
+        }
+        return Optional.of("\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"");
     }
 }

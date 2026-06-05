@@ -11,7 +11,6 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.FoldContext;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
-import org.elasticsearch.xpack.esql.core.expression.ReferenceAttribute;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
@@ -29,6 +28,7 @@ import org.elasticsearch.xpack.esql.plugin.EsqlFlags;
 import java.util.List;
 import java.util.Map;
 
+import static org.elasticsearch.xpack.esql.EsqlTestUtils.referenceAttribute;
 import static org.hamcrest.Matchers.instanceOf;
 
 public class PushSortToExternalSourceTests extends ESTestCase {
@@ -83,6 +83,23 @@ public class PushSortToExternalSourceTests extends ESTestCase {
         assertTrue(resultExt.pushedSort().isEmpty());
     }
 
+    public void testSortNotPushedForExpressionKey() {
+        ExternalSourceExec ext = connectorSource();
+        Order expressionOrder = new Order(
+            Source.EMPTY,
+            new Literal(Source.EMPTY, 1, DataType.INTEGER),
+            Order.OrderDirection.ASC,
+            Order.NullsPosition.LAST
+        );
+        TopNExec topN = new TopNExec(Source.EMPTY, ext, List.of(expressionOrder), literal(10), null);
+
+        PhysicalPlan result = applyRule(topN, CONNECTOR_TYPE, true);
+
+        ExternalSourceExec resultExt = (ExternalSourceExec) ((TopNExec) result).child();
+        assertTrue(resultExt.pushedSort().isEmpty());
+        assertEquals(FormatReader.NO_LIMIT, resultExt.pushedLimit());
+    }
+
     public void testSortNotPushedWithoutExternalContext() {
         ExternalSourceExec ext = connectorSource();
         TopNExec topN = new TopNExec(Source.EMPTY, ext, List.of(order("x", true)), literal(10), null);
@@ -115,13 +132,13 @@ public class PushSortToExternalSourceTests extends ESTestCase {
     }
 
     private static List<Attribute> attrs() {
-        return List.of(new ReferenceAttribute(Source.EMPTY, "x", DataType.INTEGER));
+        return List.of(referenceAttribute("x", DataType.INTEGER));
     }
 
     private static Order order(String name, boolean asc) {
         return new Order(
             Source.EMPTY,
-            new ReferenceAttribute(Source.EMPTY, name, DataType.INTEGER),
+            referenceAttribute(name, DataType.INTEGER),
             asc ? Order.OrderDirection.ASC : Order.OrderDirection.DESC,
             Order.NullsPosition.LAST
         );
