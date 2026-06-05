@@ -43,15 +43,16 @@ public interface ExternalSourceFactory {
     }
 
     /**
-     * Whether this factory's sources can compute a pushed {@code STATS} aggregation remotely and return the
-     * <em>final</em> grouped result rows.
+     * Whether this factory's sources can compute a pushed {@code STATS} aggregation remotely.
      * <p>
      * Only sources that natively understand ESQL aggregation and run it server-side — e.g. the elasticsearch
      * connector, which renders the aggregate into the remote {@code _query} — should return {@code true}. When
-     * {@code true}, the optimizer may replace an {@code AggregateExec -> source} subtree with the source alone,
-     * trusting it to return one final row per group (no local re-aggregation). File-based sources that answer
-     * aggregates from footer statistics use {@link FormatReader#aggregatePushdownSupport()} instead and must
-     * return {@code false} here (the default).
+     * {@code true}, the optimizer may replace an {@code AggregateExec -> source} subtree with the source alone. For
+     * a {@code SINGLE} aggregate the source returns final rows; for the usual {@code FINAL(INITIAL(source))} plan,
+     * the source sits in the {@code INITIAL} position and must emit the intermediate aggregate state described by
+     * {@link QueryRequest#aggregateIntermediateState()} so the surviving {@code FINAL} aggregate can merge it.
+     * File-based sources that answer aggregates from footer statistics use {@link FormatReader#aggregatePushdownSupport()}
+     * instead and must return {@code false} here (the default).
      */
     default boolean aggregatePushdownSupported() {
         return false;
