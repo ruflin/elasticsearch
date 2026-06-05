@@ -85,7 +85,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             1000,
             null
         );
-        assertEquals("FROM logs | KEEP @timestamp, message", ElasticsearchConnector.buildRemoteQuery(request));
+        assertEquals("FROM logs | KEEP `@timestamp`, `message`", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
     public void testBuildRemoteQueryNoProjection() {
@@ -95,7 +95,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
 
     public void testBuildRemoteQueryPushesLimit() {
         var request = new QueryRequest("logs", List.of("message"), List.of(), Map.of(), 1000, 5, null);
-        assertEquals("FROM logs | KEEP message | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
+        assertEquals("FROM logs | KEEP `message` | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
     public void testBuildRemoteQueryPushesFilter() {
@@ -106,7 +106,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             null
         );
         var request = new QueryRequest("logs", List.of("count"), List.of(), Map.of(), 1000, FormatNoLimit.VALUE, List.of(filter), null);
-        assertEquals("FROM logs | WHERE `count` > 10 | KEEP count", ElasticsearchConnector.buildRemoteQuery(request));
+        assertEquals("FROM logs | WHERE `count` > 10 | KEEP `count`", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
     public void testBuildRemoteQueryPushesFilterAndLimit() {
@@ -118,6 +118,15 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         );
         var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, 3, List.of(filter), null);
         assertEquals("FROM logs | WHERE `count` > 10 | LIMIT 3", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryRejectsInjectableTarget() {
+        var request = new QueryRequest("logs | DROP age", List.of(), List.of(), Map.of(), 1000, null);
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> ElasticsearchConnector.buildRemoteQuery(request)
+        );
+        assertTrue(e.getMessage().contains("illegal character"));
     }
 
     /** Mirror of {@link org.elasticsearch.xpack.esql.datasources.spi.FormatReader#NO_LIMIT} for readable test code. */

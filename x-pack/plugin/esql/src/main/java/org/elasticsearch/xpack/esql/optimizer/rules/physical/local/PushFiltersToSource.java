@@ -340,11 +340,15 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
     /**
      * Resolves filter pushdown support for the source.
      * <p>
-     * File-based sources expose pushdown through their {@link FormatReader#filterPushdownSupport()},
-     * looked up by format name. Connector-based sources (which have no {@link FormatReader}) expose it
-     * through {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type. The file
-     * path is consulted first so existing format-reader behavior is unchanged; the connector factory is
-     * a fallback used only when no format reader matches.
+     * Connector-based sources (e.g. the elasticsearch connector) expose pushdown through their
+     * {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type. File-based
+     * sources have no connector factory and instead expose it through their
+     * {@link FormatReader#filterPushdownSupport()}, looked up by format name.
+     * <p>
+     * The connector factory is consulted first: a connector's remote resource can look like a file
+     * path (e.g. {@code es://host:9200/logs.parquet}), and the format-reader lookup keys off that
+     * suffix, so checking the connector by source type first prevents misclassifying a connector
+     * source as a Parquet/CSV/etc. file.
      */
     private static FilterPushdownSupport resolveFilterPushdownSupport(
         String formatName,
@@ -354,6 +358,10 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         if (ctx.external() == null) {
             return null;
         }
+        ExternalSourceFactory factory = sourceType == null ? null : ctx.external().sourceFactories().get(sourceType);
+        if (factory != null && factory.filterPushdownSupport() != null) {
+            return factory.filterPushdownSupport();
+        }
         FormatReaderRegistry formatReaderRegistry = ctx.external().formatReaderRegistry();
         if (formatReaderRegistry != null) {
             FormatReader formatReader = formatReaderRegistry.findByName(formatName);
@@ -361,9 +369,7 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
                 return formatReader.filterPushdownSupport();
             }
         }
-        // Connector-based sources (e.g. the elasticsearch connector) declare pushdown on their factory.
-        ExternalSourceFactory factory = sourceType == null ? null : ctx.external().sourceFactories().get(sourceType);
-        return factory != null ? factory.filterPushdownSupport() : null;
+        return null;
     }
 
     private static PhysicalPlan planFilterExec(FilterExec filterExec, ParameterizedQueryExec pqExec, LocalPhysicalOptimizerContext ctx) {

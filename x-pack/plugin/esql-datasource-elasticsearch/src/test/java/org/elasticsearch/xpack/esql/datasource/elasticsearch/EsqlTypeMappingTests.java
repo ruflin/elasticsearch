@@ -104,6 +104,33 @@ public class EsqlTypeMappingTests extends ESTestCase {
         }
     }
 
+    public void testDatetimeBlockFromEpochMillis() {
+        try (Block block = EsqlTypeMapping.toBlock(DataType.DATETIME, Arrays.asList(1700000000000L, null), 2, blockFactory)) {
+            assertThat(block, instanceOf(LongBlock.class));
+            LongBlock b = (LongBlock) block;
+            assertEquals(1700000000000L, b.getLong(0));
+            assertTrue(b.isNull(1));
+        }
+    }
+
+    public void testDatetimeBlockFromIso8601String() {
+        try (Block block = EsqlTypeMapping.toBlock(DataType.DATETIME, List.of("2023-11-14T22:13:20.000Z"), 1, blockFactory)) {
+            assertThat(block, instanceOf(LongBlock.class));
+            assertEquals(1700000000000L, ((LongBlock) block).getLong(0));
+        }
+    }
+
+    public void testRaggedColumnFillsMissingPositionsWithNull() {
+        // rowCount (3) exceeds this column's length (1); missing positions must decode to null, not throw.
+        try (Block block = EsqlTypeMapping.toBlock(DataType.KEYWORD, List.of("a"), 3, blockFactory)) {
+            assertThat(block, instanceOf(BytesRefBlock.class));
+            BytesRefBlock b = (BytesRefBlock) block;
+            assertEquals(new BytesRef("a"), b.getBytesRef(0, new BytesRef()));
+            assertTrue(b.isNull(1));
+            assertTrue(b.isNull(2));
+        }
+    }
+
     public void testUnsupportedTypeForDecodingThrows() {
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
