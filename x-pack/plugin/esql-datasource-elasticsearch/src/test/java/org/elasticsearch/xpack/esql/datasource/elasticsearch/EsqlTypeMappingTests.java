@@ -131,7 +131,16 @@ public class EsqlTypeMappingTests extends ESTestCase {
         }
     }
 
-    public void testUnsupportedTypeForDecodingThrows() {
+    public void testUnsupportedColumnTypeDecodesAsNullBlock() {
+        // A remote column the cluster reports as `unsupported` (e.g. flattened) must not fail the query;
+        // it surfaces as an all-null column so the rest of the row stays usable.
+        try (Block block = EsqlTypeMapping.toBlock(DataType.UNSUPPORTED, List.of(), 3, blockFactory)) {
+            assertTrue(block.areAllValuesNull());
+            assertEquals(3, block.getPositionCount());
+        }
+    }
+
+    public void testUndecodableTypeThrows() {
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
             () -> EsqlTypeMapping.toBlock(DataType.GEO_POINT, List.of(), 0, blockFactory)

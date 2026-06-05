@@ -66,7 +66,7 @@ public final class ElasticsearchStorageProvider implements StorageProvider {
 
     @Override
     public List<String> supportedSchemes() {
-        return List.of("es", "elasticsearch");
+        return List.copyOf(ElasticsearchDataSourcePlugin.SCHEMES);
     }
 
     @Override
@@ -74,9 +74,9 @@ public final class ElasticsearchStorageProvider implements StorageProvider {
 
     private static void validateScheme(StoragePath path) {
         String scheme = path.scheme().toLowerCase(Locale.ROOT);
-        if ("es".equals(scheme) == false && "elasticsearch".equals(scheme) == false) {
+        if (ElasticsearchDataSourcePlugin.SCHEMES.contains(scheme) == false) {
             throw new IllegalArgumentException(
-                "ElasticsearchStorageProvider only supports es:// and elasticsearch:// schemes, got: " + scheme
+                "ElasticsearchStorageProvider only supports " + ElasticsearchDataSourcePlugin.SCHEMES + " schemes, got: " + scheme
             );
         }
     }

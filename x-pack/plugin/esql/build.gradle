@@ -210,6 +210,13 @@ tasks.named("internalClusterTest").configure {
     systemProperty 'es.geoip.load_db_on_heap', 'true'
   }
 
+  // Optional: point ElasticsearchExternalSourceLiveIT at a real remote cluster. The IT self-skips when unset.
+  ['tests.esql.remote.url', 'tests.esql.remote.apikey', 'tests.esql.remote.target'].each { key ->
+    if (System.getProperty(key) != null) {
+      systemProperty key, System.getProperty(key)
+    }
+  }
+
   def injected = project.objects.newInstance(Injected)
   File snippetsFolder = file("build/testrun/internalClusterTest/temp/esql/_snippets")
   def snippetsDocFolder = file("${rootDir}/docs/reference/query-languages/esql/_snippets/generated/x-pack-esql")
