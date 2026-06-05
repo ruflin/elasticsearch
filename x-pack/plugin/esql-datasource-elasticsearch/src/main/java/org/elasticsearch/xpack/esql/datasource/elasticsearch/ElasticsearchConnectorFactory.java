@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
+import org.apache.http.Header;
 import org.apache.http.HttpHost;
 import org.apache.http.message.BasicHeader;
 import org.elasticsearch.client.Request;
@@ -139,7 +140,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
                 .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT_MILLIS)
         );
         if (apiKey != null) {
-            builder.setDefaultHeaders(new org.apache.http.Header[] { new BasicHeader("Authorization", "ApiKey " + apiKey) });
+            builder.setDefaultHeaders(new Header[] { new BasicHeader("Authorization", "ApiKey " + apiKey) });
         }
         return builder.build();
     }

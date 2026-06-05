@@ -199,12 +199,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
     }
 
     private void indexRemoteDocs(String index) {
-        remoteCluster.client()
-            .admin()
-            .indices()
-            .prepareCreate(index)
-            .setMapping("name", "type=keyword", "age", "type=long")
-            .get();
+        remoteCluster.client().admin().indices().prepareCreate(index).setMapping("name", "type=keyword", "age", "type=long").get();
         indexRemoteDoc(index, "1", "{\"name\":\"alice\",\"age\":30}");
         indexRemoteDoc(index, "2", "{\"name\":\"bob\",\"age\":35}");
         indexRemoteDoc(index, "3", "{\"name\":\"carol\",\"age\":40}");

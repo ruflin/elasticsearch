@@ -67,15 +67,7 @@ public class PushSortToExternalSourceTests extends ESTestCase {
     }
 
     public void testSortNotPushedForUnknownSourceType() {
-        ExternalSourceExec ext = new ExternalSourceExec(
-            Source.EMPTY,
-            "file:///test.csv",
-            FILE_TYPE,
-            attrs(),
-            Map.of(),
-            Map.of(),
-            null
-        );
+        ExternalSourceExec ext = new ExternalSourceExec(Source.EMPTY, "file:///test.csv", FILE_TYPE, attrs(), Map.of(), Map.of(), null);
         TopNExec topN = new TopNExec(Source.EMPTY, ext, List.of(order("x", true)), literal(10), null);
 
         // No factory registered for the file source type, so the sort is left for the local TopN.

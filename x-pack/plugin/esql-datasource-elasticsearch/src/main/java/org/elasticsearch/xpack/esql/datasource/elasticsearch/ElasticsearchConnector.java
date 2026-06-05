@@ -93,23 +93,11 @@ class ElasticsearchConnector implements Connector {
         }
         // Sort remotely so a paired LIMIT returns the correct global top-N. Before KEEP so a sort key the
         // projection drops is still present when the remote sorts.
-        List<RemoteSort> sort = request.pushedSort();
-        appendSort(query, sort);
+        appendSort(query, request.pushedSort());
         // Project only the columns the local query needs so the remote cluster returns less data.
-        List<String> projected = request.projectedColumns();
-        if (projected != null && projected.isEmpty() == false) {
-            query.append(" | KEEP ");
-            for (int i = 0; i < projected.size(); i++) {
-                if (i > 0) {
-                    query.append(", ");
-                }
-                // Quote like WHERE fields so dotted / special / reserved column names stay valid remote ES|QL.
-                query.append(EsqlIdentifiers.quote(projected.get(i)));
-            }
-        }
+        appendKeep(query, request.projectedColumns());
         // Push the row limit so the remote cluster stops early instead of returning every matching row.
-        int rowLimit = request.rowLimit();
-        appendLimit(query, rowLimit);
+        appendLimit(query, request.rowLimit());
         return query.toString();
     }
 
@@ -130,6 +118,19 @@ class ElasticsearchConnector implements Connector {
     private static void appendLimit(StringBuilder query, int rowLimit) {
         if (rowLimit != FormatReader.NO_LIMIT && rowLimit >= 0) {
             query.append(" | LIMIT ").append(rowLimit);
+        }
+    }
+
+    private static void appendKeep(StringBuilder query, List<String> projected) {
+        if (projected != null && projected.isEmpty() == false) {
+            query.append(" | KEEP ");
+            for (int i = 0; i < projected.size(); i++) {
+                if (i > 0) {
+                    query.append(", ");
+                }
+                // Quote like WHERE fields so dotted / special / reserved column names stay valid remote ES|QL.
+                query.append(EsqlIdentifiers.quote(projected.get(i)));
+            }
         }
     }
 
@@ -258,7 +259,14 @@ class ElasticsearchConnector implements Connector {
             }
             // Each aggregate becomes a (value, seen=true) pair.
             for (RemoteAggregate aggregate : aggregates) {
-                blocks[out++] = decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
+                blocks[out++] = decodeColumnByName(
+                    aggregate.outputName(),
+                    columnIndexByName,
+                    columns,
+                    columnValues,
+                    rowCount,
+                    blockFactory
+                );
                 blocks[out++] = blockFactory.newConstantBooleanBlockWith(true, rowCount);
             }
             success = true;

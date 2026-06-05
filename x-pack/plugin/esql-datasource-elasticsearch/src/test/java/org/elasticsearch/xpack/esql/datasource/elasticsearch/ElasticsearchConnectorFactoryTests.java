@@ -38,7 +38,9 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     }
 
     public void testParseLocationWithExplicitPort() {
-        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation("es://remote.example.com:9201/logs-*");
+        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation(
+            "es://remote.example.com:9201/logs-*"
+        );
         assertEquals("http://remote.example.com:9201", endpoint.baseUrl());
         assertEquals("logs-*", endpoint.target());
     }
@@ -132,7 +134,11 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     public void testBuildRemoteQueryPushesFilter() {
         Expression filter = new GreaterThan(
             Source.EMPTY,
-            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new FieldAttribute(
+                Source.EMPTY,
+                "count",
+                new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)
+            ),
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
@@ -156,7 +162,11 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     public void testBuildRemoteQueryPushesFilterAndLimit() {
         Expression filter = new GreaterThan(
             Source.EMPTY,
-            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new FieldAttribute(
+                Source.EMPTY,
+                "count",
+                new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)
+            ),
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
@@ -219,7 +229,11 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     public void testBuildRemoteQueryPushesFilterBeforeStats() {
         Expression filter = new GreaterThan(
             Source.EMPTY,
-            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new FieldAttribute(
+                Source.EMPTY,
+                "count",
+                new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)
+            ),
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
@@ -284,10 +298,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
 
     public void testBuildRemoteQueryRejectsInjectableTarget() {
         var request = new QueryRequest("logs | DROP age", List.of(), List.of(), Map.of(), 1000, null);
-        IllegalArgumentException e = expectThrows(
-            IllegalArgumentException.class,
-            () -> ElasticsearchConnector.buildRemoteQuery(request)
-        );
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> ElasticsearchConnector.buildRemoteQuery(request));
         assertTrue(e.getMessage().contains("illegal character"));
     }
 
