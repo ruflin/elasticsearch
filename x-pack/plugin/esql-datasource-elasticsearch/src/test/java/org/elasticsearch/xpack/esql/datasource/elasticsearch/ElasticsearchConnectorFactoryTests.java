@@ -15,6 +15,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.type.EsField;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 
 import java.util.List;
@@ -126,7 +127,17 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
-        var request = new QueryRequest("logs", List.of("count"), List.of(), Map.of(), 1000, FormatNoLimit.VALUE, List.of(filter), null);
+        var request = new QueryRequest(
+            "logs",
+            List.of("count"),
+            List.of(),
+            Map.of(),
+            1000,
+            FormatNoLimit.VALUE,
+            List.of(filter),
+            List.of(),
+            null
+        );
         assertEquals("FROM logs | WHERE `count` > 10 | KEEP `count`", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
@@ -137,8 +148,26 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             new Literal(Source.EMPTY, 10, DataType.INTEGER),
             null
         );
-        var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, 3, List.of(filter), null);
+        var request = new QueryRequest("logs", List.of(), List.of(), Map.of(), 1000, 3, List.of(filter), List.of(), null);
         assertEquals("FROM logs | WHERE `count` > 10 | LIMIT 3", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesSortBeforeKeepAndLimit() {
+        var request = new QueryRequest(
+            "logs",
+            List.of("message"),
+            List.of(),
+            Map.of(),
+            1000,
+            5,
+            List.of(),
+            List.of(new RemoteSort("@timestamp", false, false), new RemoteSort("message", true, true)),
+            null
+        );
+        assertEquals(
+            "FROM logs | SORT `@timestamp` DESC NULLS LAST, `message` ASC NULLS FIRST | KEEP `message` | LIMIT 5",
+            ElasticsearchConnector.buildRemoteQuery(request)
+        );
     }
 
     public void testBuildRemoteQueryRejectsInjectableTarget() {

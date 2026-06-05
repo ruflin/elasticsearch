@@ -67,7 +67,8 @@ public record SourceOperatorContext(
     int parallelism,
     @Nullable String datasetName,
     boolean deferredExtraction,
-    DeclaredReadSpec declaredReadSpec
+    DeclaredReadSpec declaredReadSpec,
+    List<RemoteSort> pushedSort
 ) {
     /**
      * Single source of truth for the {@code external_max_concurrent_open_segments} default. Lives in this SPI (leaf)
@@ -84,6 +85,7 @@ public record SourceOperatorContext(
         config = config != null ? Map.copyOf(config) : Map.of();
         sourceMetadata = sourceMetadata != null ? Map.copyOf(sourceMetadata) : Map.of();
         pushedExpressions = pushedExpressions != null ? List.copyOf(pushedExpressions) : List.of();
+        pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
         schemaMap = schemaMap != null ? schemaMap : Map.of();
         partitionColumnNames = partitionColumnNames != null && partitionColumnNames.isEmpty() == false
             ? Collections.unmodifiableSet(new LinkedHashSet<>(partitionColumnNames))
@@ -147,7 +149,8 @@ public record SourceOperatorContext(
             1,
             null,
             false,
-            DeclaredReadSpec.NONE
+            DeclaredReadSpec.NONE,
+            List.of()
         );
     }
 
@@ -190,7 +193,8 @@ public record SourceOperatorContext(
             1,
             null,
             false,
-            DeclaredReadSpec.NONE
+            DeclaredReadSpec.NONE,
+            List.of()
         );
     }
 
@@ -232,7 +236,8 @@ public record SourceOperatorContext(
             1,
             null,
             false,
-            DeclaredReadSpec.NONE
+            DeclaredReadSpec.NONE,
+            List.of()
         );
     }
 
@@ -272,7 +277,8 @@ public record SourceOperatorContext(
             1,
             null,
             false,
-            DeclaredReadSpec.NONE
+            DeclaredReadSpec.NONE,
+            List.of()
         );
     }
 
@@ -312,6 +318,7 @@ public record SourceOperatorContext(
         private String datasetName;
         private boolean deferredExtraction;
         private DeclaredReadSpec declaredReadSpec = DeclaredReadSpec.NONE;
+        private List<RemoteSort> pushedSort;
 
         public Builder sourceType(String sourceType) {
             this.sourceType = sourceType;
@@ -475,6 +482,11 @@ public record SourceOperatorContext(
             return this;
         }
 
+        public Builder pushedSort(List<RemoteSort> pushedSort) {
+            this.pushedSort = pushedSort;
+            return this;
+        }
+
         public SourceOperatorContext build() {
             return new SourceOperatorContext(
                 sourceType,
@@ -502,7 +514,8 @@ public record SourceOperatorContext(
                 parallelism,
                 datasetName,
                 deferredExtraction,
-                declaredReadSpec
+                declaredReadSpec,
+                pushedSort
             );
         }
     }

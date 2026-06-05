@@ -23,6 +23,10 @@ import java.util.Map;
  *        original {@link Expression}s; connectors that natively understand ESQL (e.g. the elasticsearch
  *        connector) translate them back into a remote {@code WHERE} clause. Never serialized: connectors
  *        execute on the coordinator only, so the expressions are produced and consumed in the same JVM.
+ * @param pushedSort sort keys the optimizer asked the connector to apply remotely, paired with
+ *        {@link #rowLimit()}. Empty when no sort was pushed. Connectors that natively understand ESQL
+ *        sorting (e.g. the elasticsearch connector) render these into a remote {@code SORT}. Never
+ *        serialized, for the same coordinator-only reason as {@code pushedFilters}.
  */
 public record QueryRequest(
     String target,
@@ -32,11 +36,13 @@ public record QueryRequest(
     int batchSize,
     int rowLimit,
     List<Expression> pushedFilters,
+    List<RemoteSort> pushedSort,
     BlockFactory blockFactory
 ) {
 
     public QueryRequest {
         pushedFilters = pushedFilters != null ? List.copyOf(pushedFilters) : List.of();
+        pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
     }
 
     public QueryRequest(
@@ -47,7 +53,7 @@ public record QueryRequest(
         int batchSize,
         BlockFactory blockFactory
     ) {
-        this(target, projectedColumns, attributes, config, batchSize, FormatReader.NO_LIMIT, List.of(), blockFactory);
+        this(target, projectedColumns, attributes, config, batchSize, FormatReader.NO_LIMIT, List.of(), List.of(), blockFactory);
     }
 
     public QueryRequest(
@@ -59,10 +65,20 @@ public record QueryRequest(
         int rowLimit,
         BlockFactory blockFactory
     ) {
-        this(target, projectedColumns, attributes, config, batchSize, rowLimit, List.of(), blockFactory);
+        this(target, projectedColumns, attributes, config, batchSize, rowLimit, List.of(), List.of(), blockFactory);
     }
 
     public QueryRequest withBlockFactory(BlockFactory blockFactory) {
-        return new QueryRequest(target, projectedColumns, attributes, config, batchSize, rowLimit, pushedFilters, blockFactory);
+        return new QueryRequest(
+            target,
+            projectedColumns,
+            attributes,
+            config,
+            batchSize,
+            rowLimit,
+            pushedFilters,
+            pushedSort,
+            blockFactory
+        );
     }
 }

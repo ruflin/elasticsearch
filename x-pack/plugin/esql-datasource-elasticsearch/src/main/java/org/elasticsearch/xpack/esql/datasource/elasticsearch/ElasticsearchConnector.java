@@ -20,6 +20,7 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
 
@@ -64,17 +65,35 @@ class ElasticsearchConnector implements Connector {
      * possible, pushes work to the remote cluster so less data crosses the wire:
      * <ul>
      *   <li>{@code WHERE} for the pushed filter expressions (best-effort; see {@link EsqlFilterTranslator}),</li>
+     *   <li>{@code SORT} for the pushed sort keys (paired with the limit, this makes the remote return the
+     *       correct global top-N instead of an arbitrary page),</li>
      *   <li>{@code KEEP} for the projected columns,</li>
      *   <li>{@code LIMIT} for the pushed row limit (if any).</li>
      * </ul>
-     * The local plan keeps a safety-net {@code FilterExec}/{@code LimitExec} above the source, so an
-     * over- or under-rendered pushdown can never produce wrong results — it only affects how much data
-     * is transferred.
+     * Stage order is {@code FROM | WHERE | SORT | KEEP | LIMIT}: SORT runs before KEEP so a sort key dropped
+     * by the projection is still available when the remote sorts, and before LIMIT so the limit keeps the
+     * top-N rather than the first page. The local plan keeps a safety-net {@code FilterExec}/{@code TopNExec}/
+     * {@code LimitExec} above the source, so an over- or under-rendered pushdown can never produce wrong
+     * results — it only affects how much data is transferred.
      */
     static String buildRemoteQuery(QueryRequest request) {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
+        // Sort remotely so a paired LIMIT returns the correct global top-N. Before KEEP so a sort key the
+        // projection drops is still present when the remote sorts.
+        List<RemoteSort> sort = request.pushedSort();
+        if (sort != null && sort.isEmpty() == false) {
+            query.append(" | SORT ");
+            for (int i = 0; i < sort.size(); i++) {
+                if (i > 0) {
+                    query.append(", ");
+                }
+                RemoteSort s = sort.get(i);
+                query.append(EsqlIdentifiers.quote(s.field())).append(s.ascending() ? " ASC" : " DESC");
+                query.append(s.nullsFirst() ? " NULLS FIRST" : " NULLS LAST");
+            }
+        }
         // Project only the columns the local query needs so the remote cluster returns less data.
         List<String> projected = request.projectedColumns();
         if (projected != null && projected.isEmpty() == false) {
