@@ -171,6 +171,34 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
         assertThat("connector count matches the direct full-dataset count (STATS pushed down)", viaConnector, equalTo(direct));
     }
 
+    /**
+     * Ungrouped {@code COUNT(field)}, {@code MIN(field)} and {@code MAX(field)} are pushed to the remote and
+     * computed server-side over the full data set, so they match a direct aggregate exactly instead of being
+     * capped by the implicit FROM page size. Field values are compared as-is (the field is a remote {@code long}).
+     */
+    public void testUngroupedCountMinMaxPushdownMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // A numeric field present in logs* with a large number of non-null values, so COUNT(field) would be
+        // capped (and MIN/MAX computed over a truncated set) without STATS pushdown.
+        String field = "`resource.attributes.host.cpu.cache.l2.size`";
+        String stats = " | STATS c = COUNT(" + field + "), mn = MIN(" + field + "), mx = MAX(" + field + ")";
+
+        List<Object> direct = directValues("FROM " + TARGET + stats).get(0);
+        List<Object> viaConnector = runExternal(externalSource() + stats).get(0);
+
+        long directCount = ((Number) direct.get(0)).longValue();
+        assertThat("the field has many non-null values, so the count would be capped without pushdown", directCount, greaterThan(10_000L));
+        assertThat("connector COUNT(field) matches the direct full-dataset count", ((Number) viaConnector.get(0)).longValue(), equalTo(directCount));
+        assertThat("connector MIN(field) matches direct", asLongOrNull(viaConnector.get(1)), equalTo(asLongOrNull(direct.get(1))));
+        assertThat("connector MAX(field) matches direct", asLongOrNull(viaConnector.get(2)), equalTo(asLongOrNull(direct.get(2))));
+    }
+
+    private static Long asLongOrNull(Object value) {
+        return value == null ? null : ((Number) value).longValue();
+    }
+
     private List<List<Object>> runExternal(String query) {
         try (var response = run(syncEsqlQueryRequest(query))) {
             List<List<Object>> rows = new ArrayList<>();
