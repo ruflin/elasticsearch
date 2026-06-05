@@ -373,6 +373,9 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
     /**
      * Connector-based sources (which have no {@link FormatReader}) expose filter pushdown through
      * {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type.
+     * File-based sources are handled by {@link #resolveFormatReader} first; this is only the
+     * fallback. Lookup is by {@code sourceType} (not path suffix), so a connector resource that
+     * looks like a file (e.g. {@code es://host:9200/logs.parquet}) is not misclassified as Parquet.
      */
     private static FilterPushdownSupport resolveConnectorFilterPushdownSupport(String sourceType, LocalPhysicalOptimizerContext ctx) {
         if (ctx == null || ctx.external() == null || sourceType == null) {

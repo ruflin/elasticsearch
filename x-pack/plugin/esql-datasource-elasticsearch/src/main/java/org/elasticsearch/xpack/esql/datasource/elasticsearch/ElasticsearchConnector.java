@@ -7,7 +7,6 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
-import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.compute.data.Block;
@@ -53,10 +52,7 @@ class ElasticsearchConnector implements Connector {
         String esqlQuery = buildRemoteQuery(request);
         Response response;
         try {
-            Request httpRequest = new Request("POST", "/_query");
-            httpRequest.addParameter("format", "json");
-            httpRequest.setJsonEntity(queryBody(esqlQuery));
-            response = client.performRequest(httpRequest);
+            response = client.performRequest(RemoteQuery.request(esqlQuery));
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
         }
@@ -76,7 +72,7 @@ class ElasticsearchConnector implements Connector {
      * is transferred.
      */
     static String buildRemoteQuery(QueryRequest request) {
-        StringBuilder query = new StringBuilder("FROM ").append(request.target());
+        StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
         // Project only the columns the local query needs so the remote cluster returns less data.
@@ -87,7 +83,8 @@ class ElasticsearchConnector implements Connector {
                 if (i > 0) {
                     query.append(", ");
                 }
-                query.append(projected.get(i));
+                // Quote like WHERE fields so dotted / special / reserved column names stay valid remote ES|QL.
+                query.append(EsqlIdentifiers.quote(projected.get(i)));
             }
         }
         // Push the row limit so the remote cluster stops early instead of returning every matching row.
@@ -96,11 +93,6 @@ class ElasticsearchConnector implements Connector {
             query.append(" | LIMIT ").append(rowLimit);
         }
         return query.toString();
-    }
-
-    private static String queryBody(String esqlQuery) {
-        // columnar=true makes the response group values by column, which maps directly onto Blocks.
-        return "{\"query\":\"" + esqlQuery.replace("\"", "\\\"") + "\",\"columnar\":true}";
     }
 
     @SuppressWarnings("unchecked")

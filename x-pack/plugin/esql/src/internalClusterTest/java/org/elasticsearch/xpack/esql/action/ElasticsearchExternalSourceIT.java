@@ -125,14 +125,18 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows, hasItem(List.of("carol", 40L)));
     }
 
-    public void testFilterPushdownReturnsSubset() throws Exception {
+    // The filter/limit assertions below verify end-to-end correctness with pushdown enabled. They do
+    // not by themselves prove the WHERE/LIMIT was executed remotely: the local FilterExec/LimitExec
+    // safety nets would make the same assertions pass even without pushdown. buildRemoteQuery unit
+    // tests cover the remote-query string; proving remote execution (request capture) is a follow-up.
+
+    public void testFilterWithPushdownEnabledReturnsSubset() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         String remoteIndex = "remote-logs-filter";
         indexRemoteDocs(remoteIndex);
 
         String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
-        // WHERE on age is translated to a remote `| WHERE age > 30`; the local FilterExec stays as a safety net.
         String query = "EXTERNAL \"" + location + "\" | WHERE age > 30 | KEEP name, age | SORT age";
 
         List<List<Object>> rows = runExternal(query);
@@ -141,7 +145,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows.get(1), equalTo(List.of("carol", 40L)));
     }
 
-    public void testFilterPushdownOnKeyword() throws Exception {
+    public void testKeywordFilterWithPushdownEnabled() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         String remoteIndex = "remote-logs-keyword";
@@ -155,7 +159,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows.get(0), equalTo(List.of("alice", 30L)));
     }
 
-    public void testLimitPushdownCapsRows() throws Exception {
+    public void testLimitWithPushdownEnabledCapsRows() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         String remoteIndex = "remote-logs-limit";
@@ -168,7 +172,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows.size(), equalTo(2));
     }
 
-    public void testFilterAndLimitPushdownTogether() throws Exception {
+    public void testFilterAndLimitWithPushdownEnabled() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
 
         String remoteIndex = "remote-logs-filter-limit";

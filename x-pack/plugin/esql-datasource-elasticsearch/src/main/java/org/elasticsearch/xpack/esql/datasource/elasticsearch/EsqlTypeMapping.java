@@ -16,6 +16,7 @@ import org.elasticsearch.xpack.esql.core.expression.ReferenceAttribute;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -63,7 +64,8 @@ final class EsqlTypeMapping {
     static Block toBlock(DataType dataType, List<Object> values, int rowCount, BlockFactory blockFactory) {
         return switch (dataType) {
             case KEYWORD, TEXT, IP, VERSION -> buildBytesRef(values, rowCount, blockFactory);
-            case LONG, DATETIME -> buildLong(values, rowCount, blockFactory);
+            case LONG -> buildLong(values, rowCount, blockFactory, false);
+            case DATETIME -> buildLong(values, rowCount, blockFactory, true);
             case INTEGER -> buildInt(values, rowCount, blockFactory);
             case DOUBLE -> buildDouble(values, rowCount, blockFactory);
             case BOOLEAN -> buildBoolean(values, rowCount, blockFactory);
@@ -73,10 +75,19 @@ final class EsqlTypeMapping {
         };
     }
 
+    /**
+     * Reads the value for {@code row}, treating positions beyond the column length as {@code null}.
+     * A columnar {@code _query} response is expected to be rectangular, but tolerating a ragged
+     * column avoids an {@link IndexOutOfBoundsException} on a malformed response.
+     */
+    private static Object valueAt(List<Object> values, int row) {
+        return row < values.size() ? values.get(row) : null;
+    }
+
     private static Block buildBytesRef(List<Object> values, int rowCount, BlockFactory blockFactory) {
         try (var builder = blockFactory.newBytesRefBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
-                Object value = values.get(i);
+                Object value = valueAt(values, i);
                 if (value == null) {
                     builder.appendNull();
                 } else {
@@ -87,14 +98,17 @@ final class EsqlTypeMapping {
         }
     }
 
-    private static Block buildLong(List<Object> values, int rowCount, BlockFactory blockFactory) {
+    private static Block buildLong(List<Object> values, int rowCount, BlockFactory blockFactory, boolean datetime) {
         try (var builder = blockFactory.newLongBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
-                Object value = values.get(i);
+                Object value = valueAt(values, i);
                 if (value == null) {
                     builder.appendNull();
                 } else if (value instanceof Number n) {
                     builder.appendLong(n.longValue());
+                } else if (datetime) {
+                    // Remote ES|QL JSON renders datetimes as ISO-8601 strings; store epoch millis.
+                    builder.appendLong(parseDateMillis(value.toString()));
                 } else {
                     builder.appendLong(Long.parseLong(value.toString()));
                 }
@@ -103,10 +117,19 @@ final class EsqlTypeMapping {
         }
     }
 
+    private static long parseDateMillis(String value) {
+        try {
+            // A numeric string is treated as epoch millis; anything else as an ISO-8601 datetime.
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return Instant.parse(value).toEpochMilli();
+        }
+    }
+
     private static Block buildInt(List<Object> values, int rowCount, BlockFactory blockFactory) {
         try (var builder = blockFactory.newIntBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
-                Object value = values.get(i);
+                Object value = valueAt(values, i);
                 if (value == null) {
                     builder.appendNull();
                 } else if (value instanceof Number n) {
@@ -122,7 +145,7 @@ final class EsqlTypeMapping {
     private static Block buildDouble(List<Object> values, int rowCount, BlockFactory blockFactory) {
         try (var builder = blockFactory.newDoubleBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
-                Object value = values.get(i);
+                Object value = valueAt(values, i);
                 if (value == null) {
                     builder.appendNull();
                 } else if (value instanceof Number n) {
@@ -138,7 +161,7 @@ final class EsqlTypeMapping {
     private static Block buildBoolean(List<Object> values, int rowCount, BlockFactory blockFactory) {
         try (var builder = blockFactory.newBooleanBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
-                Object value = values.get(i);
+                Object value = valueAt(values, i);
                 if (value == null) {
                     builder.appendNull();
                 } else if (value instanceof Boolean b) {
