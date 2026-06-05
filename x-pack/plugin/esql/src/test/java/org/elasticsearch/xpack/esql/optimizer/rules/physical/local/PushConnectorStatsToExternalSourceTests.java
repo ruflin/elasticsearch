@@ -22,7 +22,9 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
@@ -135,9 +137,29 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertThat(result, instanceOf(AggregateExec.class));
     }
 
+    public void testMinFieldPushed() {
+        ExternalSourceExec ext = connectorSource();
+        AggregateExec agg = singleAggregate(ext, alias("m", new Min(Source.EMPTY, MESSAGE)));
+
+        PhysicalPlan result = applyRule(agg, true);
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals("MIN", resultExt.pushedAggregates().get(0).function());
+        assertEquals("message", resultExt.pushedAggregates().get(0).field());
+    }
+
+    public void testMaxFieldPushed() {
+        ExternalSourceExec ext = connectorSource();
+        AggregateExec agg = singleAggregate(ext, alias("m", new Max(Source.EMPTY, MESSAGE)));
+
+        PhysicalPlan result = applyRule(agg, true);
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals("MAX", resultExt.pushedAggregates().get(0).function());
+        assertEquals("message", resultExt.pushedAggregates().get(0).field());
+    }
+
     public void testNotPushedForUnsupportedFunctionYet() {
-        // MIN is outside Step D scope; the local aggregate must remain.
-        AggregateExec agg = singleAggregate(connectorSource(), alias("m", new Min(Source.EMPTY, MESSAGE)));
+        // SUM has a multi-channel intermediate state and is outside this step's scope; the local aggregate remains.
+        AggregateExec agg = singleAggregate(connectorSource(), alias("s", new Sum(Source.EMPTY, MESSAGE)));
         PhysicalPlan result = applyRule(agg, true);
         assertThat(result, instanceOf(AggregateExec.class));
     }
