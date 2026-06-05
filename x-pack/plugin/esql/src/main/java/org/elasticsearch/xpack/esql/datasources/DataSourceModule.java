@@ -507,6 +507,14 @@ public final class DataSourceModule implements Closeable {
             return resolveDelegate().expandsPatternRemotely();
         }
 
+        @Override
+        public boolean sortPushdownSupported() {
+            // Like filterPushdownSupport(): only consulted during physical optimization when a query has a
+            // pushable sort over this connector, which is about to execute against it anyway. Resolving (and
+            // class-loading) the delegate here is accepted for the same reason.
+            return resolveDelegate().sortPushdownSupported();
+        }
+
         private ConnectorFactory resolveDelegate() {
             if (delegate == null) {
                 synchronized (this) {

@@ -29,6 +29,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
+import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
 
 import java.io.IOException;
@@ -74,7 +75,7 @@ import java.util.Set;
  *       {@code unifiedSchema} is the exception: {@code toPhysicalExec()} rebuilds it on every node
  *       from the serialized {@code metadata.schema()}.</li>
  *   <li><b>Local-execution pushdown hints (not serialized):</b> {@code pushedFilter},
- *       {@code pushedExpressions}, {@code pushedLimit}, {@code pushedTopN},
+ *       {@code pushedExpressions}, {@code pushedLimit}, {@code pushedTopN}, {@code pushedSort},
  *       {@code deferredExtraction}. These are decisions produced by {@code LocalPhysicalPlanOptimizer}
  *       rules that run <em>after</em> this exec is created, independently on each node. They are
  *       intentionally re-derived per-node and must not be serialized.</li>
@@ -148,6 +149,13 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
      * create a SourceExtractors registry that nothing ever closes).
      */
     private final boolean deferredExtraction;
+    /**
+     * Sort orders the optimizer asked the source to apply remotely, paired with {@link #pushedLimit}.
+     * Only connector sources that natively understand ESQL sorting (e.g. the elasticsearch connector)
+     * consume this; for everyone else it stays empty and the enclosing {@code TopNExec} safety net does
+     * the sorting. NOT serialized — coordinator-only, set by {@code PushSortToExternalSource}.
+     */
+    private final List<Order> pushedSort;
 
     /**
      * Public 13-arg ctor used by {@link #info()} (via constructor reference) and by tree tests.
@@ -181,6 +189,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             null,
+            List.of(),
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -226,6 +235,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             null,
+            List.of(),
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -255,6 +265,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         List<Expression> pushedExpressions,
         int pushedLimit,
         @Nullable BlockHash.TopNDef pushedTopN,
+        List<Order> pushedSort,
         Integer estimatedRowSize,
         FileList fileList,
         Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap,
@@ -272,6 +283,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -294,6 +306,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         List<Expression> pushedExpressions,
         int pushedLimit,
         @Nullable BlockHash.TopNDef pushedTopN,
+        List<Order> pushedSort,
         Integer estimatedRowSize,
         FileList fileList,
         Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap,
@@ -322,6 +335,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         this.pushedExpressions = pushedExpressions != null ? List.copyOf(pushedExpressions) : List.of();
         this.pushedLimit = pushedLimit;
         this.pushedTopN = pushedTopN;
+        this.pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
         this.estimatedRowSize = estimatedRowSize;
         this.fileList = fileList;
         this.schemaMap = schemaMap != null ? schemaMap : Map.of();
@@ -420,6 +434,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             List.of(),
             FormatReader.NO_LIMIT,
             null,
+            List.of(),
             estimatedRowSize,
             null,
             Map.of(),
@@ -569,6 +584,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -597,6 +613,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             newFileList,
             schemaMap,
@@ -620,6 +637,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -643,6 +661,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             newPushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -666,6 +685,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             newLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -701,6 +721,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -727,6 +748,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             newPushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -749,6 +771,42 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
     }
 
     /**
+     * Returns a copy of this source carrying the given remote sort orders. See {@link #pushedSort()}.
+     */
+    public ExternalSourceExec withPushedSort(List<Order> newPushedSort) {
+        return new ExternalSourceExec(
+            source(),
+            sourcePath,
+            sourceType,
+            attributes,
+            config,
+            sourceMetadata,
+            pushedFilter,
+            pushedExpressions,
+            pushedLimit,
+            pushedTopN,
+            newPushedSort,
+            estimatedRowSize,
+            fileList,
+            schemaMap,
+            unifiedSchema,
+            splits,
+            datasetName,
+            deferredExtraction,
+            declaredReadSpec
+        );
+    }
+
+    /**
+     * Sort orders set by {@code PushSortToExternalSource} for connector sources that apply the sort remotely
+     * (alongside {@link #pushedLimit()}). Empty when no sort was pushed. Transient local-execution hint; never
+     * serialized and re-derived independently on each node.
+     */
+    public List<Order> pushedSort() {
+        return pushedSort;
+    }
+
+    /**
      * Returns a copy of this source carrying the given pre-prune Unified schema. See {@link #unifiedSchema()}.
      * Applied by {@link org.elasticsearch.xpack.esql.plan.logical.ExternalRelation#toPhysicalExec()} after
      * construction so the Unified schema does not appear in {@link #info()} (which would let the optimizer's
@@ -766,6 +824,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -809,6 +868,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -838,6 +898,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -874,6 +935,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -904,6 +966,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             newEstimatedRowSize,
             fileList,
             schemaMap,
@@ -917,8 +980,8 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
 
     @Override
     protected NodeInfo<? extends PhysicalPlan> info() {
-        // pushedTopN: excluded — transient local-execution hint; including it would break the
-        // node-reflection invariant in EsqlNodeSubclassTests#testInfoParameters. Preserved via
+        // pushedTopN / pushedSort: excluded — transient local-execution hints; including them would break
+        // the node-reflection invariant in EsqlNodeSubclassTests#testInfoParameters. Preserved via
         // explicit with* methods; rendered in nodeString() for debuggability.
         // unifiedSchema: also excluded — the optimizer's attribute-rewriting rules walk every arg
         // in info() and would prune the Unified schema along with `attributes`, defeating its
@@ -965,6 +1028,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -996,6 +1060,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             && Objects.equals(pushedExpressions, other.pushedExpressions)
             && pushedLimit == other.pushedLimit
             && Objects.equals(pushedTopN, other.pushedTopN)
+            && Objects.equals(pushedSort, other.pushedSort)
             && Objects.equals(estimatedRowSize, other.estimatedRowSize)
             && Objects.equals(fileList, other.fileList)
             && Objects.equals(schemaMap, other.schemaMap)
@@ -1027,6 +1092,9 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         }
         if (pushedTopN != null) {
             sb.append("[topN=keys:").append(pushedTopN.sortKeys().size()).append(",limit:").append(pushedTopN.limit()).append("]");
+        }
+        if (pushedSort.isEmpty() == false) {
+            sb.append("[sort=").append(pushedSort).append("]");
         }
         if (splits.isEmpty() == false) {
             sb.append("[splits=").append(splits.size()).append("]");

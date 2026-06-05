@@ -82,9 +82,10 @@ public class OperatorFactoryRegistry {
                 Object targetObj = context.config().get("target");
                 String target = targetObj != null ? targetObj.toString() : context.path().toString();
                 // QueryRequest carries the still-encrypted config; connectors take secrets from open(), not request.config().
-                // The pushed row limit (FormatReader.NO_LIMIT when absent) and pushed filter expressions are forwarded so
-                // connectors can apply them remotely (e.g. append LIMIT / WHERE to a remote query) instead of pulling the
-                // full result set. pushedExpressions is empty unless the optimizer pushed filters to this connector.
+                // The pushed row limit (FormatReader.NO_LIMIT when absent), pushed filter expressions, and pushed sort keys
+                // are forwarded so connectors can apply them remotely (e.g. append SORT / LIMIT / WHERE to a remote query)
+                // instead of pulling the full result set. pushedExpressions/pushedSort are empty unless the optimizer pushed
+                // filters/sort to this connector.
                 QueryRequest request = new QueryRequest(
                     target,
                     projectedColumns,
@@ -93,6 +94,7 @@ public class OperatorFactoryRegistry {
                     context.batchSize(),
                     context.rowLimit(),
                     context.pushedExpressions(),
+                    context.pushedSort(),
                     null
                 );
                 return new AsyncConnectorSourceOperatorFactory(connector, request, context.maxBufferSize(), executor, context.sliceQueue());
