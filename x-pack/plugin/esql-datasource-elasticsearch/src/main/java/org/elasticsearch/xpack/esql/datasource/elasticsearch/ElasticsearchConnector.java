@@ -82,27 +82,19 @@ class ElasticsearchConnector implements Connector {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
-        // A pushed aggregate replaces row materialization entirely: render STATS and return the final grouped
-        // rows. The projection/sort/limit are not applied — the aggregate output is the result schema.
+        // A pushed aggregate replaces row materialization entirely: render STATS and return aggregate output rows.
+        // SORT/LIMIT may still apply to those aggregate rows (for STATS ... | SORT ... | LIMIT ...).
         List<RemoteAggregate> aggregates = request.pushedAggregates();
         if (aggregates != null && aggregates.isEmpty() == false) {
             appendStats(query, aggregates, request.pushedGroupings());
+            appendSort(query, request.pushedSort());
+            appendLimit(query, request.rowLimit());
             return query.toString();
         }
         // Sort remotely so a paired LIMIT returns the correct global top-N. Before KEEP so a sort key the
         // projection drops is still present when the remote sorts.
         List<RemoteSort> sort = request.pushedSort();
-        if (sort != null && sort.isEmpty() == false) {
-            query.append(" | SORT ");
-            for (int i = 0; i < sort.size(); i++) {
-                if (i > 0) {
-                    query.append(", ");
-                }
-                RemoteSort s = sort.get(i);
-                query.append(EsqlIdentifiers.quote(s.field())).append(s.ascending() ? " ASC" : " DESC");
-                query.append(s.nullsFirst() ? " NULLS FIRST" : " NULLS LAST");
-            }
-        }
+        appendSort(query, sort);
         // Project only the columns the local query needs so the remote cluster returns less data.
         List<String> projected = request.projectedColumns();
         if (projected != null && projected.isEmpty() == false) {
@@ -117,10 +109,28 @@ class ElasticsearchConnector implements Connector {
         }
         // Push the row limit so the remote cluster stops early instead of returning every matching row.
         int rowLimit = request.rowLimit();
+        appendLimit(query, rowLimit);
+        return query.toString();
+    }
+
+    private static void appendSort(StringBuilder query, List<RemoteSort> sort) {
+        if (sort != null && sort.isEmpty() == false) {
+            query.append(" | SORT ");
+            for (int i = 0; i < sort.size(); i++) {
+                if (i > 0) {
+                    query.append(", ");
+                }
+                RemoteSort s = sort.get(i);
+                query.append(EsqlIdentifiers.quote(s.field())).append(s.ascending() ? " ASC" : " DESC");
+                query.append(s.nullsFirst() ? " NULLS FIRST" : " NULLS LAST");
+            }
+        }
+    }
+
+    private static void appendLimit(StringBuilder query, int rowLimit) {
         if (rowLimit != FormatReader.NO_LIMIT && rowLimit >= 0) {
             query.append(" | LIMIT ").append(rowLimit);
         }
-        return query.toString();
     }
 
     /**

@@ -11,6 +11,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.spi.DataSourceValidator;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
 
 import java.util.Map;
@@ -55,5 +56,13 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
     @Override
     public Map<String, ConnectorFactory> connectors(Settings settings) {
         return Map.of(TYPE, new ElasticsearchConnectorFactory());
+    }
+
+    @Override
+    public Map<String, DataSourceValidator> datasourceValidators(Settings settings) {
+        // Enables `PUT _query/data_source` with `type: elasticsearch`, so the endpoint and (encrypted) API key
+        // are registered once and referenced by datasets instead of being repeated in every inline query.
+        DataSourceValidator validator = new ElasticsearchDataSourceValidator();
+        return Map.of(validator.type(), validator);
     }
 }

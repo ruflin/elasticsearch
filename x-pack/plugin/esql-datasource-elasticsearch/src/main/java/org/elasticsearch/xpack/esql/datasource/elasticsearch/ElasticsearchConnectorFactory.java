@@ -50,6 +50,9 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     static final String CONFIG_API_KEY = "api_key";
 
     static final int DEFAULT_PORT = 9200;
+    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
+    private static final int SOCKET_TIMEOUT_MILLIS = 60_000;
+    private static final int CONNECTION_REQUEST_TIMEOUT_MILLIS = 10_000;
 
     @Override
     public String type() {
@@ -58,10 +61,16 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     @Override
     public boolean canHandle(String location) {
-        return location.startsWith("es://")
-            || location.startsWith("elasticsearch://")
-            || location.startsWith("es+https://")
-            || location.startsWith("elasticsearch+https://");
+        return canHandleLocation(location);
+    }
+
+    /** True if {@code location} uses one of this connector's URI schemes. Shared with CRUD-time validation. */
+    static boolean canHandleLocation(String location) {
+        return location != null
+            && (location.startsWith("es://")
+                || location.startsWith("elasticsearch://")
+                || location.startsWith("es+https://")
+                || location.startsWith("elasticsearch+https://"));
     }
 
     @Override
@@ -98,6 +107,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     @Override
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
+        validateConfig(location, config);
         Endpoint endpoint = parseLocation(location);
         String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);
         try (RestClient client = buildClient(endpoint.baseUrl(), apiKey)) {
@@ -123,6 +133,11 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     private static RestClient buildClient(String baseUrl, String apiKey) {
         var builder = RestClient.builder(HttpHost.create(baseUrl));
+        builder.setRequestConfigCallback(
+            requestConfig -> requestConfig.setConnectTimeout(CONNECT_TIMEOUT_MILLIS)
+                .setSocketTimeout(SOCKET_TIMEOUT_MILLIS)
+                .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT_MILLIS)
+        );
         if (apiKey != null) {
             builder.setDefaultHeaders(new org.apache.http.Header[] { new BasicHeader("Authorization", "ApiKey " + apiKey) });
         }
@@ -185,6 +200,11 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         String host = uri.getHost();
         if (host == null) {
             throw new IllegalArgumentException("Invalid Elasticsearch location [" + location + "]: missing host");
+        }
+        if (uri.getUserInfo() != null) {
+            throw new IllegalArgumentException(
+                "Invalid Elasticsearch location [" + location + "]: user info is not supported; use api_key config instead"
+            );
         }
         String path = uri.getPath();
         if (path == null || path.length() <= 1) {

@@ -78,6 +78,14 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertTrue(e.getMessage().contains("missing index"));
     }
 
+    public void testParseLocationRejectsUserInfo() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> ElasticsearchConnectorFactory.parseLocation("es://user:pass@remote:9200/logs")
+        );
+        assertTrue(e.getMessage().contains("user info is not supported"));
+    }
+
     public void testValidateConfigAcceptsApiKey() {
         factory.validateConfig("es://remote:9200/logs", Map.of("api_key", "secret"));
     }
@@ -205,8 +213,31 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             false,
             null
         );
-        // STATS replaces projection/sort/limit; the aggregate output is the result schema.
-        assertEquals("FROM logs | STATS `c` = COUNT(*)", ElasticsearchConnector.buildRemoteQuery(request));
+        assertEquals("FROM logs | STATS `c` = COUNT(*) | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testBuildRemoteQueryPushesFilterBeforeStats() {
+        Expression filter = new GreaterThan(
+            Source.EMPTY,
+            new FieldAttribute(Source.EMPTY, "count", new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)),
+            new Literal(Source.EMPTY, 10, DataType.INTEGER),
+            null
+        );
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            FormatNoLimit.VALUE,
+            List.of(filter),
+            List.of(),
+            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(),
+            false,
+            null
+        );
+        assertEquals("FROM logs | WHERE `count` > 10 | STATS `c` = COUNT(*)", ElasticsearchConnector.buildRemoteQuery(request));
     }
 
     public void testBuildRemoteQueryPushesStatsWithFieldAndGrouping() {
@@ -226,6 +257,27 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         );
         assertEquals(
             "FROM logs | STATS `c` = COUNT(*), `mx` = MAX(`bytes`) BY `data_stream.type`",
+            ElasticsearchConnector.buildRemoteQuery(request)
+        );
+    }
+
+    public void testBuildRemoteQueryPushesSortAndLimitAfterStats() {
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            5,
+            List.of(),
+            List.of(new RemoteSort("c", false, false)),
+            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of("service.name"),
+            false,
+            null
+        );
+        assertEquals(
+            "FROM logs | STATS `c` = COUNT(*) BY `service.name` | SORT `c` DESC NULLS LAST | LIMIT 5",
             ElasticsearchConnector.buildRemoteQuery(request)
         );
     }
