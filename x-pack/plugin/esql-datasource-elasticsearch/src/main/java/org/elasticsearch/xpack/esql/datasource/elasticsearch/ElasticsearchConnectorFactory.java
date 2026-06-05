@@ -58,7 +58,10 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     @Override
     public boolean canHandle(String location) {
-        return location.startsWith("es://") || location.startsWith("elasticsearch://");
+        return location.startsWith("es://")
+            || location.startsWith("elasticsearch://")
+            || location.startsWith("es+https://")
+            || location.startsWith("elasticsearch+https://");
     }
 
     @Override
@@ -70,6 +73,12 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     public FilterPushdownSupport filterPushdownSupport() {
         // The remote source speaks ES|QL, so filters are pushed by re-rendering them into a remote WHERE clause.
         return EsqlFilterTranslator.INSTANCE;
+    }
+
+    @Override
+    public boolean expandsPatternRemotely() {
+        // The target is a remote index/data-stream pattern (e.g. logs*); the remote cluster expands it.
+        return true;
     }
 
     @Override
@@ -147,23 +156,37 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     /**
-     * Parses {@code es://host:port/index} into a base URL and target index. The scheme is normalized
-     * to {@code http} for the HTTP client; TLS is out of scope for v1.
+     * Parses {@code es://host:port/index} into a base URL and target index.
+     * <p>
+     * The transport defaults to plaintext {@code http}. TLS is selected with a {@code +https} scheme
+     * suffix ({@code es+https://...} or {@code elasticsearch+https://...}); when secure and no explicit
+     * port is given, the URL default ({@code 443}) is used so managed endpoints such as Elastic Cloud
+     * work without spelling out a port. Plaintext with no explicit port defaults to {@value #DEFAULT_PORT}.
      */
     static Endpoint parseLocation(String location) {
         URI uri = URI.create(location);
+        String scheme = uri.getScheme();
+        if (scheme == null) {
+            throw new IllegalArgumentException("Invalid Elasticsearch location [" + location + "]: missing scheme");
+        }
+        boolean secure = scheme.endsWith("+https");
         String host = uri.getHost();
         if (host == null) {
             throw new IllegalArgumentException("Invalid Elasticsearch location [" + location + "]: missing host");
         }
-        int port = uri.getPort() > 0 ? uri.getPort() : DEFAULT_PORT;
         String path = uri.getPath();
         if (path == null || path.length() <= 1) {
             throw new IllegalArgumentException("Invalid Elasticsearch location [" + location + "]: missing index in path");
         }
         String target = path.substring(1);
-        String baseUrl = "http://" + host + ":" + port;
-        return new Endpoint(baseUrl, target);
+        StringBuilder baseUrl = new StringBuilder(secure ? "https://" : "http://").append(host);
+        if (uri.getPort() > 0) {
+            baseUrl.append(':').append(uri.getPort());
+        } else if (secure == false) {
+            // Plaintext keeps the historical 9200 default; secure relies on the URL's implicit 443.
+            baseUrl.append(':').append(DEFAULT_PORT);
+        }
+        return new Endpoint(baseUrl.toString(), target);
     }
 
     record Endpoint(String baseUrl, String target) {}

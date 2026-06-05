@@ -47,6 +47,27 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertEquals("logs", endpoint.target());
     }
 
+    public void testParseLocationSecureDefaultsToNoExplicitPort() {
+        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation(
+            "es+https://abc.es.europe-west1.gcp.elastic.cloud/logs*"
+        );
+        assertEquals("https://abc.es.europe-west1.gcp.elastic.cloud", endpoint.baseUrl());
+        assertEquals("logs*", endpoint.target());
+    }
+
+    public void testParseLocationSecureWithExplicitPort() {
+        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation(
+            "elasticsearch+https://remote.example.com:9243/metrics"
+        );
+        assertEquals("https://remote.example.com:9243", endpoint.baseUrl());
+        assertEquals("metrics", endpoint.target());
+    }
+
+    public void testCanHandleSecureSchemes() {
+        assertTrue(factory.canHandle("es+https://host/logs"));
+        assertTrue(factory.canHandle("elasticsearch+https://host/logs"));
+    }
+
     public void testParseLocationMissingIndexThrows() {
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,

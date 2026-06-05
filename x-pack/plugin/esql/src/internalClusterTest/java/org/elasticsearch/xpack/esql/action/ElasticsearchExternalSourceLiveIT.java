@@ -1,0 +1,188 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
+ */
+
+package org.elasticsearch.xpack.esql.action;
+
+import org.apache.http.HttpHost;
+import org.apache.http.message.BasicHeader;
+import org.elasticsearch.client.Request;
+import org.elasticsearch.client.Response;
+import org.elasticsearch.client.RestClient;
+import org.elasticsearch.common.Strings;
+import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentParserConfiguration;
+import org.elasticsearch.xcontent.json.JsonXContent;
+import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.datasource.TestEncryptionServicePlugin;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
+import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.lessThan;
+import static org.hamcrest.Matchers.notNullValue;
+
+/**
+ * Live end-to-end test that points the {@code elasticsearch} external data source at a <em>real</em>
+ * remote cluster (e.g. Elastic Cloud / serverless) over HTTPS and compares results against the same
+ * queries run directly through the cluster's {@code _query} API.
+ * <p>
+ * The remote endpoint and API key are supplied via system properties so no secret is committed:
+ * <pre>
+ *   -Dtests.esql.remote.url=https://&lt;host&gt;
+ *   -Dtests.esql.remote.apikey=&lt;base64 api key&gt;
+ *   [-Dtests.esql.remote.target=logs*]
+ * </pre>
+ * The test self-skips when {@code tests.esql.remote.url} is not set, so it never runs (or fails) in CI.
+ */
+public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase {
+
+    private static final String URL = System.getProperty("tests.esql.remote.url");
+    private static final String API_KEY = System.getProperty("tests.esql.remote.apikey");
+    private static final String TARGET = System.getProperty("tests.esql.remote.target", "logs*");
+
+    @Override
+    protected Collection<Class<? extends Plugin>> nodePlugins() {
+        List<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
+        plugins.add(ElasticsearchDataSourcePlugin.class);
+        plugins.add(TestEncryptionServicePlugin.class);
+        return plugins;
+    }
+
+    /**
+     * {@code EXTERNAL "es+https://host/target" [WITH {"api_key": "..."}]} prefix — derives the +https
+     * scheme and host from the configured URL and passes the API key inline via the WITH options map.
+     */
+    private String externalSource() {
+        String hostPort = URL.replaceFirst("^https?://", "");
+        String location = "es+https://" + hostPort + "/" + TARGET;
+        String prefix = "EXTERNAL \"" + location + "\"";
+        if (API_KEY != null) {
+            prefix += " WITH {\"api_key\": \"" + API_KEY + "\"}";
+        }
+        return prefix;
+    }
+
+    public void testSchemaResolvesViaConnector() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // Read a single row through the connector across the full (wide, mixed-type) schema. This exercises
+        // schema resolution, the +https transport, auth, the index pattern, and decoding of every column
+        // type the remote returns (including unsupported/date_nanos columns, which must not fail the query).
+        List<List<Object>> rows = runExternal(externalSource() + " | LIMIT 1");
+        assertThat(rows.size(), equalTo(1));
+        assertThat("each row spans the full resolved schema", rows.get(0).size(), greaterThan(50));
+    }
+
+    public void testBoundedProjectedReadIsWellFormed() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // A bounded, projected read returns exactly the requested number of rows with the requested columns,
+        // and every value decodes. NOTE: we intentionally do NOT add SORT ... | LIMIT and compare to a direct
+        // top-N — v1 pushes LIMIT but not the SORT, so the remote truncates to an arbitrary N before the local
+        // SORT runs, which yields a different sample than a globally-sorted top-N (a known v1 limitation).
+        String tail = " | WHERE message IS NOT NULL | KEEP @timestamp, message | LIMIT 50";
+        List<List<Object>> rows = runExternal(externalSource() + tail);
+        assertThat(rows.size(), equalTo(50));
+        for (List<Object> row : rows) {
+            assertThat(row.size(), equalTo(2));
+            assertThat("message projected and non-null", row.get(1), notNullValue());
+        }
+    }
+
+    public void testFilterPushdownOnlyReturnsMatchingRows() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // Pick a dataset value that exists, push an equality filter on it, and verify every returned row
+        // matches. This validates filter pushdown correctness without depending on exact remote totals
+        // (which the v1 implicit row cap would otherwise distort for an aggregate).
+        List<List<Object>> top = directValues(
+            "FROM " + TARGET + " | WHERE data_stream.dataset IS NOT NULL | STATS c = COUNT(*) BY data_stream.dataset"
+                + " | SORT c DESC | LIMIT 1"
+        );
+        assumeTrue("remote has a non-null dataset to filter on", top.isEmpty() == false);
+        String dataset = String.valueOf(top.get(0).get(1));
+
+        String tail = " | WHERE data_stream.dataset == \"" + dataset + "\" | KEEP data_stream.dataset | LIMIT 100";
+        List<List<Object>> rows = runExternal(externalSource() + tail);
+        assertThat("filter matched at least one row", rows.isEmpty(), equalTo(false));
+        for (List<Object> row : rows) {
+            assertThat(String.valueOf(row.get(0)), equalTo(dataset));
+        }
+    }
+
+    /**
+     * Documents a known v1 limitation: an unbounded aggregate (no explicit LIMIT) over the connector does
+     * NOT match a direct aggregate, because there is no STATS pushdown and the remote {@code FROM} caps the
+     * pulled rows (~1000). The connector aggregate is therefore computed over a truncated row set. This test
+     * asserts the capped behavior so the gap is tracked rather than silently passing.
+     */
+    public void testUnboundedAggregateIsCappedKnownLimitation() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        long direct = ((Number) directValues("FROM " + TARGET + " | STATS c = COUNT(*)").get(0).get(0)).longValue();
+        long viaConnector = ((Number) runExternal(externalSource() + " | STATS c = COUNT(*)").get(0).get(0)).longValue();
+        assertThat("remote has far more than the connector's pulled cap", direct, greaterThan(10_000L));
+        assertThat("connector count is capped by the implicit FROM page size, not the true total", viaConnector, lessThan(direct));
+    }
+
+    private List<List<Object>> runExternal(String query) {
+        try (var response = run(syncEsqlQueryRequest(query))) {
+            List<List<Object>> rows = new ArrayList<>();
+            for (Iterator<Iterator<Object>> it = response.values(); it.hasNext();) {
+                List<Object> row = new ArrayList<>();
+                it.next().forEachRemaining(row::add);
+                rows.add(row);
+            }
+            return rows;
+        }
+    }
+
+    /** Runs the query straight against the remote {@code _query} API with the configured API key. */
+    @SuppressWarnings("unchecked")
+    private List<List<Object>> directValues(String esql) throws IOException {
+        HttpHost host = HttpHost.create(URL);
+        var builder = RestClient.builder(host);
+        if (API_KEY != null) {
+            builder.setDefaultHeaders(new org.apache.http.Header[] { new BasicHeader("Authorization", "ApiKey " + API_KEY) });
+        }
+        try (RestClient client = builder.build()) {
+            Request request = new Request("POST", "/_query");
+            request.addParameter("format", "json");
+            request.setJsonEntity(Strings.format("{\"query\":%s}", quote(esql)));
+            Response response = client.performRequest(request);
+            try (
+                InputStream content = response.getEntity().getContent();
+                XContentParser parser = JsonXContent.jsonXContent.createParser(XContentParserConfiguration.EMPTY, content)
+            ) {
+                Map<String, Object> body = parser.map();
+                List<List<Object>> rows = new ArrayList<>();
+                for (Object rowObj : (List<Object>) body.getOrDefault("values", List.of())) {
+                    rows.add((List<Object>) rowObj);
+                }
+                return rows;
+            }
+        }
+    }
+
+    private static String quote(String s) {
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+}
