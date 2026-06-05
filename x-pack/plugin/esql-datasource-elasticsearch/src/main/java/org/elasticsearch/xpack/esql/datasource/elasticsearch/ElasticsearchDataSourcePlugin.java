@@ -27,9 +27,12 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
 
     static final String TYPE = "elasticsearch";
 
+    // Plaintext and TLS (+https) variants of both aliases. TLS is opt-in via the scheme suffix.
+    static final Set<String> SCHEMES = Set.of("es", "elasticsearch", "es+https", "elasticsearch+https");
+
     @Override
     public Set<String> supportedSchemes() {
-        return Set.of("es", "elasticsearch");
+        return SCHEMES;
     }
 
     @Override
@@ -37,12 +40,16 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
         // A placeholder storage provider so the resolver can register a concrete file-list entry;
         // actual reads go through the connector. See ElasticsearchStorageProvider.
         StorageProviderFactory factory = StorageProviderFactory.noConfigKeys(ElasticsearchStorageProvider::new);
-        return Map.of("es", factory, "elasticsearch", factory);
+        Map<String, StorageProviderFactory> providers = new java.util.HashMap<>();
+        for (String scheme : SCHEMES) {
+            providers.put(scheme, factory);
+        }
+        return Map.copyOf(providers);
     }
 
     @Override
     public Set<String> supportedConnectorSchemes() {
-        return Set.of("es", "elasticsearch");
+        return SCHEMES;
     }
 
     @Override

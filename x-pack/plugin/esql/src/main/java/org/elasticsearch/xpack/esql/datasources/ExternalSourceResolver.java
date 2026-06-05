@@ -215,7 +215,9 @@ public class ExternalSourceResolver {
     ) throws Exception {
         LOGGER.debug("Resolving external source: path=[{}]", path);
 
-        if (GlobExpander.isMultiFile(path)) {
+        // Connectors that resolve their own patterns (e.g. an Elasticsearch index pattern like logs*)
+        // must not be glob-expanded against the storage provider; pass the pattern through as one source.
+        if (GlobExpander.isMultiFile(path) && expandsPatternRemotely(path) == false) {
             return resolveMultiFileSource(path, config, hints, hivePartitioning);
         }
 
@@ -779,6 +781,16 @@ public class ExternalSourceResolver {
             return true;
         }
         return "false".equalsIgnoreCase(value.toString()) == false;
+    }
+
+    /** True when a registered factory claims this path and resolves wildcard patterns remotely. */
+    private boolean expandsPatternRemotely(String path) {
+        for (ExternalSourceFactory factory : dataSourceModule.sourceFactories().values()) {
+            if (factory.canHandle(path)) {
+                return factory.expandsPatternRemotely();
+            }
+        }
+        return false;
     }
 
     private SourceMetadata resolveSingleSource(String path, Map<String, Object> config) {

@@ -42,6 +42,20 @@ public interface ExternalSourceFactory {
         return null;
     }
 
+    /**
+     * Whether this factory resolves wildcard/multi-target patterns itself rather than via local glob
+     * expansion over a {@link StorageProvider}.
+     * <p>
+     * File-based sources expand a glob such as {@code s3://bucket/logs-*.parquet} by listing storage and
+     * matching names. API-based connectors to systems that resolve their own patterns (for example an
+     * Elasticsearch index pattern like {@code logs*}, which the remote cluster expands) must return
+     * {@code true} so the resolver passes the pattern through to {@link #resolveMetadata} as a single
+     * source instead of attempting (unsupported) directory listing.
+     */
+    default boolean expandsPatternRemotely() {
+        return false;
+    }
+
     default SourceOperatorFactoryProvider operatorFactory() {
         return null;
     }

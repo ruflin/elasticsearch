@@ -64,11 +64,16 @@ final class EsqlTypeMapping {
     static Block toBlock(DataType dataType, List<Object> values, int rowCount, BlockFactory blockFactory) {
         return switch (dataType) {
             case KEYWORD, TEXT, IP, VERSION -> buildBytesRef(values, rowCount, blockFactory);
-            case LONG -> buildLong(values, rowCount, blockFactory, false);
-            case DATETIME -> buildLong(values, rowCount, blockFactory, true);
+            case LONG -> buildLong(values, rowCount, blockFactory, TemporalKind.NONE);
+            case DATETIME -> buildLong(values, rowCount, blockFactory, TemporalKind.MILLIS);
+            case DATE_NANOS -> buildLong(values, rowCount, blockFactory, TemporalKind.NANOS);
             case INTEGER -> buildInt(values, rowCount, blockFactory);
             case DOUBLE -> buildDouble(values, rowCount, blockFactory);
             case BOOLEAN -> buildBoolean(values, rowCount, blockFactory);
+            // Columns the remote reports as unsupported (e.g. flattened) or null carry no decodable values;
+            // surface them as an all-null column, mirroring local ES|QL where an unsupported field reads as null
+            // unless operated on. This keeps the rest of the row usable instead of failing the whole query.
+            case UNSUPPORTED, NULL -> blockFactory.newConstantNullBlock(rowCount);
             default -> throw new IllegalArgumentException(
                 "Unsupported remote Elasticsearch column type for value decoding: " + dataType.typeName()
             );
@@ -98,7 +103,14 @@ final class EsqlTypeMapping {
         }
     }
 
-    private static Block buildLong(List<Object> values, int rowCount, BlockFactory blockFactory, boolean datetime) {
+    /** How a long-backed column should interpret string values from the remote JSON. */
+    private enum TemporalKind {
+        NONE,
+        MILLIS,
+        NANOS
+    }
+
+    private static Block buildLong(List<Object> values, int rowCount, BlockFactory blockFactory, TemporalKind temporal) {
         try (var builder = blockFactory.newLongBlockBuilder(rowCount)) {
             for (int i = 0; i < rowCount; i++) {
                 Object value = valueAt(values, i);
@@ -106,23 +118,26 @@ final class EsqlTypeMapping {
                     builder.appendNull();
                 } else if (value instanceof Number n) {
                     builder.appendLong(n.longValue());
-                } else if (datetime) {
-                    // Remote ES|QL JSON renders datetimes as ISO-8601 strings; store epoch millis.
-                    builder.appendLong(parseDateMillis(value.toString()));
                 } else {
-                    builder.appendLong(Long.parseLong(value.toString()));
+                    // Remote ES|QL JSON renders dates as ISO-8601 strings; plain longs as numeric strings.
+                    builder.appendLong(switch (temporal) {
+                        case NONE -> Long.parseLong(value.toString());
+                        case MILLIS -> parseEpoch(value.toString(), false);
+                        case NANOS -> parseEpoch(value.toString(), true);
+                    });
                 }
             }
             return builder.build();
         }
     }
 
-    private static long parseDateMillis(String value) {
+    private static long parseEpoch(String value, boolean nanos) {
         try {
-            // A numeric string is treated as epoch millis; anything else as an ISO-8601 datetime.
+            // A numeric string is already epoch millis/nanos; anything else is an ISO-8601 datetime.
             return Long.parseLong(value);
         } catch (NumberFormatException e) {
-            return Instant.parse(value).toEpochMilli();
+            Instant instant = Instant.parse(value);
+            return nanos ? instant.getEpochSecond() * 1_000_000_000L + instant.getNano() : instant.toEpochMilli();
         }
     }
 

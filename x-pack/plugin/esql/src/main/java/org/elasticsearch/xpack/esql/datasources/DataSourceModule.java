@@ -371,6 +371,13 @@ public final class DataSourceModule implements Closeable {
             return resolveDelegate().filterPushdownSupport();
         }
 
+        @Override
+        public boolean expandsPatternRemotely() {
+            // Only consulted after canHandle() during source resolution, which already resolves the
+            // delegate, so this does not cause additional eager loading during optimization.
+            return resolveDelegate().expandsPatternRemotely();
+        }
+
         private ConnectorFactory resolveDelegate() {
             if (delegate == null) {
                 synchronized (this) {
