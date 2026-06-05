@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
@@ -197,6 +198,40 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
 
     private static Long asLongOrNull(Object value) {
         return value == null ? null : ((Number) value).longValue();
+    }
+
+    /**
+     * Grouped {@code STATS c = COUNT(*) BY <key>} is pushed to the remote and computed server-side, so the
+     * connector returns the same per-group counts as a direct aggregate over the full data set. The remote
+     * {@code STATS ... BY} response lists the aggregate before the key; the connector reorders to the
+     * key-first intermediate layout the local FINAL aggregate consumes, so this also exercises that reordering.
+     */
+    public void testGroupedCountByKeyPushdownMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // A keyword field with several distinct values, so the grouped result has multiple rows.
+        String stats = " | STATS c = COUNT(*) BY `resource.attributes.host.name`";
+
+        Map<String, Long> direct = countsByKey(directValues("FROM " + TARGET + stats));
+        Map<String, Long> viaConnector = countsByKey(runExternal(externalSource() + stats));
+
+        assertThat("the grouping key has several distinct values", direct.size(), greaterThan(1));
+        assertThat("connector grouped counts match the direct full-dataset grouped counts", viaConnector, equalTo(direct));
+    }
+
+    /** Folds {@code [count, key]} (direct) or {@code [key, count]} (connector) rows into a key -> count map. */
+    private static Map<String, Long> countsByKey(List<List<Object>> rows) {
+        Map<String, Long> counts = new HashMap<>();
+        for (List<Object> row : rows) {
+            // Identify the numeric count and the (possibly null) string key regardless of column order.
+            Object a = row.get(0);
+            Object b = row.get(1);
+            Object countObj = a instanceof Number ? a : b;
+            Object keyObj = a instanceof Number ? b : a;
+            counts.put(String.valueOf(keyObj), ((Number) countObj).longValue());
+        }
+        return counts;
     }
 
     private List<List<Object>> runExternal(String query) {
