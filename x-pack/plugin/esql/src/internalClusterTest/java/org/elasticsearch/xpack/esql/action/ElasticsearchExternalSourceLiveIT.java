@@ -220,6 +220,91 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
         assertThat("connector grouped counts match the direct full-dataset grouped counts", viaConnector, equalTo(direct));
     }
 
+    /**
+     * Grouped {@code STATS c = COUNT(*) BY <key1>, <key2>} with multiple keys is pushed to the remote, so the
+     * connector returns the same per-group counts as a direct aggregate. Keys are compared by composite value so
+     * the test is independent of remote column ordering.
+     */
+    public void testGroupedCountByMultipleKeysPushdownMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String stats = " | STATS c = COUNT(*) BY `resource.attributes.host.name`, `service.name`";
+
+        Map<String, Long> direct = countsByCompositeKey(directValues("FROM " + TARGET + stats));
+        Map<String, Long> viaConnector = countsByCompositeKey(runExternal(externalSource() + stats));
+
+        assertThat("the composite key has several distinct values", direct.size(), greaterThan(1));
+        assertThat("connector multi-key grouped counts match the direct full-dataset grouped counts", viaConnector, equalTo(direct));
+    }
+
+    /**
+     * Folds rows of a single-count, two-key grouped result into a composite-key -> count map. The numeric count is
+     * identified by type, the remaining cells (in their column order) form the key, so the mapping is independent
+     * of whether the count comes before or after the keys.
+     */
+    private static Map<String, Long> countsByCompositeKey(List<List<Object>> rows) {
+        Map<String, Long> counts = new HashMap<>();
+        for (List<Object> row : rows) {
+            long count = 0;
+            List<String> keyParts = new ArrayList<>();
+            for (Object cell : row) {
+                if (cell instanceof Number n) {
+                    count = n.longValue();
+                } else {
+                    keyParts.add(String.valueOf(cell));
+                }
+            }
+            counts.put(String.join("\u0000", keyParts), count);
+        }
+        return counts;
+    }
+
+    /**
+     * Grouped {@code STATS c = COUNT(*), n = COUNT(field) BY <key>} with multiple COUNT aggregates is pushed to the
+     * remote. This exercises the multi-aggregate intermediate layout
+     * {@code [key, c_value, c_seen, n_value, n_seen]} the connector builds for the local FINAL aggregate. Grouped
+     * MIN/MAX/SUM are intentionally out of scope (their per-group value channel may be null, which the connector's
+     * uniform {@code seen=true} expansion cannot represent), so only COUNT aggregates are validated here. The
+     * connector result must equal a direct aggregate over the full data set.
+     */
+    public void testGroupedMultiAggregatePushdownMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String field = "`resource.attributes.host.cpu.cache.l2.size`";
+        String stats = " | STATS c = COUNT(*), n = COUNT(" + field + ") BY `resource.attributes.host.name`";
+
+        Map<String, List<Long>> direct = aggsByKey(directValues("FROM " + TARGET + stats));
+        Map<String, List<Long>> viaConnector = aggsByKey(runExternal(externalSource() + stats));
+
+        assertThat("the grouping key has several distinct values", direct.size(), greaterThan(1));
+        assertThat("connector grouped multi-aggregate results match the direct full-dataset results", viaConnector, equalTo(direct));
+    }
+
+    /**
+     * Folds rows of a {@code COUNT, COUNT BY key} grouped result into a key -> [count1, count2] map. The single
+     * string cell is the key; the numeric cells are the two aggregate values, kept in their column order so
+     * connector and direct results are comparable as long as each renders the aggregates in the same relative order
+     * (both follow the query's STATS order).
+     */
+    private static Map<String, List<Long>> aggsByKey(List<List<Object>> rows) {
+        Map<String, List<Long>> result = new HashMap<>();
+        for (List<Object> row : rows) {
+            String key = null;
+            List<Long> aggs = new ArrayList<>();
+            for (Object cell : row) {
+                if (cell instanceof Number n) {
+                    aggs.add(n.longValue());
+                } else if (cell != null) {
+                    key = String.valueOf(cell);
+                }
+            }
+            result.put(key, aggs);
+        }
+        return result;
+    }
+
     /** Folds {@code [count, key]} (direct) or {@code [key, count]} (connector) rows into a key -> count map. */
     private static Map<String, Long> countsByKey(List<List<Object>> rows) {
         Map<String, Long> counts = new HashMap<>();

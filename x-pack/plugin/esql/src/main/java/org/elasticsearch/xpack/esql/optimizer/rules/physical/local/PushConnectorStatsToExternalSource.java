@@ -93,12 +93,9 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             || ext.pushedAggregates().isEmpty() == false) {
             return aggregateExec;
         }
-        // This step supports ungrouped STATS and STATS ... BY a single plain-attribute key. Multiple keys and
-        // non-attribute groupings (e.g. BY bucket(...)) are out of scope and left for a later step.
+        // Supports ungrouped STATS and STATS ... BY one or more plain-attribute keys. Non-attribute groupings
+        // (e.g. BY bucket(...) or other grouping functions) are out of scope and left for a later step.
         List<? extends Expression> groupings = aggregateExec.groupings();
-        if (groupings.size() > 1) {
-            return aggregateExec;
-        }
         List<String> remoteGroupings = new ArrayList<>(groupings.size());
         for (Expression grouping : groupings) {
             Attribute groupAttribute = Expressions.attribute(grouping);
@@ -108,9 +105,17 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             remoteGroupings.add(groupAttribute.name());
         }
 
+        boolean grouped = groupings.isEmpty() == false;
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
         for (NamedExpression agg : aggregateExec.aggregates()) {
             if (agg instanceof Alias alias && alias.child() instanceof AggregateFunction fn) {
+                // Grouped MIN/MAX would need a dense (non-null) value channel per group with the seen marker
+                // carrying presence; the connector only emits seen=true with the remote value, which is unsafe when
+                // a group's MIN/MAX is null. COUNT is always a dense non-null long, so it is the only grouped
+                // aggregate supported here. Ungrouped MIN/MAX remain supported (single-row, non-grouping state).
+                if (grouped && fn instanceof Count == false) {
+                    return aggregateExec;
+                }
                 RemoteAggregate remote = toRemoteAggregate(alias.name(), fn);
                 if (remote == null) {
                     return aggregateExec;
