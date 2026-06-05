@@ -58,6 +58,9 @@ public record QueryRequest(
 ) {
 
     public QueryRequest {
+        projectedColumns = projectedColumns != null ? List.copyOf(projectedColumns) : List.of();
+        attributes = attributes != null ? List.copyOf(attributes) : List.of();
+        config = config != null ? Map.copyOf(config) : Map.of();
         pushedFilters = pushedFilters != null ? List.copyOf(pushedFilters) : List.of();
         pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
         pushedAggregates = pushedAggregates != null ? List.copyOf(pushedAggregates) : List.of();
