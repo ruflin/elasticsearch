@@ -132,7 +132,11 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
     public void testGroupedStatsSingleKeyPushedInitialMode() {
         // STATS c = COUNT(*) BY message, INITIAL mode: the source emits the grouped intermediate state.
         ExternalSourceExec ext = connectorSource();
-        List<Attribute> intermediate = List.of(MESSAGE, referenceAttribute("c", DataType.LONG), referenceAttribute("c$seen", DataType.BOOLEAN));
+        List<Attribute> intermediate = List.of(
+            MESSAGE,
+            referenceAttribute("c", DataType.LONG),
+            referenceAttribute("c$seen", DataType.BOOLEAN)
+        );
         AggregateExec agg = new AggregateExec(
             Source.EMPTY,
             ext,

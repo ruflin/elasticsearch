@@ -28,10 +28,7 @@ import java.util.Map;
  * coordinator-side optimization, lookup-service planning, tests) that have no external sources
  * in scope.
  */
-public record ExternalOptimizerContext(
-    FormatReaderRegistry formatReaderRegistry,
-    Map<String, ExternalSourceFactory> sourceFactories
-) {
+public record ExternalOptimizerContext(FormatReaderRegistry formatReaderRegistry, Map<String, ExternalSourceFactory> sourceFactories) {
 
     public ExternalOptimizerContext {
         sourceFactories = sourceFactories != null ? Map.copyOf(sourceFactories) : Map.of();

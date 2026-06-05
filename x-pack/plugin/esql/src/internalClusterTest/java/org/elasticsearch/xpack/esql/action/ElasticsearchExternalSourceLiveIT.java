@@ -24,9 +24,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.HashMap;
 import java.util.Map;
 
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
@@ -113,7 +113,9 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
         // matches. This validates filter pushdown correctness without depending on exact remote totals
         // (which the v1 implicit row cap would otherwise distort for an aggregate).
         List<List<Object>> top = directValues(
-            "FROM " + TARGET + " | WHERE data_stream.dataset IS NOT NULL | STATS c = COUNT(*) BY data_stream.dataset"
+            "FROM "
+                + TARGET
+                + " | WHERE data_stream.dataset IS NOT NULL | STATS c = COUNT(*) BY data_stream.dataset"
                 + " | SORT c DESC | LIMIT 1"
         );
         assumeTrue("remote has a non-null dataset to filter on", top.isEmpty() == false);
@@ -191,7 +193,11 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractEsqlIntegTestCase
 
         long directCount = ((Number) direct.get(0)).longValue();
         assertThat("the field has many non-null values, so the count would be capped without pushdown", directCount, greaterThan(10_000L));
-        assertThat("connector COUNT(field) matches the direct full-dataset count", ((Number) viaConnector.get(0)).longValue(), equalTo(directCount));
+        assertThat(
+            "connector COUNT(field) matches the direct full-dataset count",
+            ((Number) viaConnector.get(0)).longValue(),
+            equalTo(directCount)
+        );
         assertThat("connector MIN(field) matches direct", asLongOrNull(viaConnector.get(1)), equalTo(asLongOrNull(direct.get(1))));
         assertThat("connector MAX(field) matches direct", asLongOrNull(viaConnector.get(2)), equalTo(asLongOrNull(direct.get(2))));
     }
