@@ -17,6 +17,8 @@ import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.AggregateFunction;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.PhysicalOptimizerRules;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
@@ -120,23 +122,36 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
     /**
      * Projects a supported aggregate function to its {@link RemoteAggregate}, or {@code null} when the function is
      * outside this step's scope (which leaves the plan untouched).
+     *
+     * <p>Only aggregates whose intermediate aggregator state is the two-channel {@code [value, seen]} layout are
+     * supported, because the connector emits intermediate state by interleaving a single {@code seen} marker after
+     * each value block. COUNT, MIN and MAX share that layout. SUM (DOUBLE adds a Kahan {@code delta} channel) and
+     * AVG (a {@code sum}+{@code count} pair) do not and are handled in a later step.
      */
     private static RemoteAggregate toRemoteAggregate(String outputName, AggregateFunction fn) {
+        if (fn.hasFilter()) {
+            return null;
+        }
         if (fn instanceof Count count) {
-            if (count.hasFilter()) {
-                return null;
-            }
             Expression field = count.field();
             if (field.foldable()) {
                 // COUNT(*) / COUNT(<literal>): no input field.
                 return new RemoteAggregate(outputName, "COUNT", null);
             }
-            if (field instanceof Attribute attr) {
-                return new RemoteAggregate(outputName, "COUNT", attr.name());
-            }
-            return null;
+            return field instanceof Attribute attr ? new RemoteAggregate(outputName, "COUNT", attr.name()) : null;
+        }
+        if (fn instanceof Min min) {
+            return fieldAggregate(outputName, "MIN", min.field());
+        }
+        if (fn instanceof Max max) {
+            return fieldAggregate(outputName, "MAX", max.field());
         }
         return null;
+    }
+
+    /** Builds a {@link RemoteAggregate} for a single-field aggregate, or {@code null} when the input is not a plain attribute. */
+    private static RemoteAggregate fieldAggregate(String outputName, String function, Expression field) {
+        return field instanceof Attribute attr ? new RemoteAggregate(outputName, function, attr.name()) : null;
     }
 
     private static boolean aggregatePushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {
