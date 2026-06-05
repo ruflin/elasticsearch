@@ -73,7 +73,7 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
     }
 
     public void testLiteralOnLeftIsFlipped() {
-        // 10 < count  ==>  count > 10
+        // 10 < count ==> count > 10
         Expression expr = new org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.LessThan(
             Source.EMPTY,
             intLit(10),

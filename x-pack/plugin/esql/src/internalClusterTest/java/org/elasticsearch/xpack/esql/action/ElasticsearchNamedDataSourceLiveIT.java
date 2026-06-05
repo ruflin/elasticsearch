@@ -21,11 +21,11 @@ import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
 import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.dataset.DeleteDatasetAction;
+import org.elasticsearch.xpack.esql.datasources.dataset.PutDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.PutDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.TestEncryptionServicePlugin;
-import org.elasticsearch.xpack.esql.datasources.dataset.DeleteDatasetAction;
-import org.elasticsearch.xpack.esql.datasources.dataset.PutDatasetAction;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -116,8 +116,10 @@ public class ElasticsearchNamedDataSourceLiveIT extends AbstractEsqlIntegTestCas
             assertThat("named-data-source count matches the direct full-dataset count", viaDataset, equalTo(direct));
         } finally {
             safeDelete(
-                () -> client().execute(DeleteDatasetAction.INSTANCE, new DeleteDatasetAction.Request(TIMEOUT, TIMEOUT, new String[] { datasetName }))
-                    .actionGet(TIMEOUT)
+                () -> client().execute(
+                    DeleteDatasetAction.INSTANCE,
+                    new DeleteDatasetAction.Request(TIMEOUT, TIMEOUT, new String[] { datasetName })
+                ).actionGet(TIMEOUT)
             );
             safeDelete(
                 () -> client().execute(
