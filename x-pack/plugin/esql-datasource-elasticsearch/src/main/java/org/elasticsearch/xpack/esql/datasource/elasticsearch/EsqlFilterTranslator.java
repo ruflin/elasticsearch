@@ -8,8 +8,9 @@
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
-import org.elasticsearch.xpack.esql.core.expression.FieldAttribute;
+import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.FoldContext;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.type.DataType;
@@ -121,15 +122,17 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
             return Optional.empty();
         }
         // Accept field <op> literal or literal <op> field, normalising to field <op> literal.
-        FieldAttribute field;
+        Attribute field;
         Literal literal;
         boolean flipped;
-        if (cmp.left() instanceof FieldAttribute fa && cmp.right() instanceof Literal lit) {
-            field = fa;
+        Attribute left = Expressions.attribute(cmp.left());
+        Attribute right = Expressions.attribute(cmp.right());
+        if (left != null && cmp.right() instanceof Literal lit) {
+            field = left;
             literal = lit;
             flipped = false;
-        } else if (cmp.left() instanceof Literal lit && cmp.right() instanceof FieldAttribute fa) {
-            field = fa;
+        } else if (cmp.left() instanceof Literal lit && right != null) {
+            field = right;
             literal = lit;
             flipped = true;
         } else {
