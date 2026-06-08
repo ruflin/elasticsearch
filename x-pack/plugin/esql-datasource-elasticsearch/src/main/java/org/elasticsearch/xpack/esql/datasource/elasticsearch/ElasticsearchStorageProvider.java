@@ -54,7 +54,12 @@ public final class ElasticsearchStorageProvider implements StorageProvider {
     @Override
     public boolean exists(StoragePath path) {
         validateScheme(path);
-        // Existence is verified by the connector when it resolves the schema / runs the query.
+        // A remote cluster is not a blob whose presence can be cheaply probed without a network round-trip,
+        // so we report "exists" and let the connector be the single source of truth: schema resolution and
+        // query execution both hit the remote _query API and fail with a clear error if the target is absent.
+        // The only risk of this optimistic answer is a caller that treats exists()==true as proof a read will
+        // succeed; no such caller exists on the ES|QL external-source path (the resolver always goes through
+        // the connector), so a missing remote surfaces at resolve/query time rather than here.
         return true;
     }
 

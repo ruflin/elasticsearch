@@ -19,6 +19,7 @@ import org.elasticsearch.xpack.esql.core.type.DataType;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -161,12 +162,15 @@ final class EsqlTypeMapping {
     }
 
     private static long parseEpoch(String value, boolean nanos) {
+        // Remote ES|QL renders date / date_nanos columns as ISO-8601 strings, so that is the expected form
+        // and is tried first: a malformed temporal value then surfaces as a DateTimeParseException rather
+        // than being silently swallowed. A bare numeric string (epoch millis/nanos) is the fallback — these
+        // never parse as ISO-8601, so the fallback is unambiguous.
         try {
-            // A numeric string is already epoch millis/nanos; anything else is an ISO-8601 datetime.
-            return Long.parseLong(value);
-        } catch (NumberFormatException e) {
             Instant instant = Instant.parse(value);
             return nanos ? instant.getEpochSecond() * 1_000_000_000L + instant.getNano() : instant.toEpochMilli();
+        } catch (DateTimeParseException e) {
+            return Long.parseLong(value);
         }
     }
 

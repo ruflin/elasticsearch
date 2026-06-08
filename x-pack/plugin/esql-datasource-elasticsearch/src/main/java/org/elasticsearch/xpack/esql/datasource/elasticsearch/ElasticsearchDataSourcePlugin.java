@@ -14,6 +14,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourceValidator;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -41,7 +42,7 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
         // A placeholder storage provider so the resolver can register a concrete file-list entry;
         // actual reads go through the connector. See ElasticsearchStorageProvider.
         StorageProviderFactory factory = StorageProviderFactory.noConfigKeys(ElasticsearchStorageProvider::new);
-        Map<String, StorageProviderFactory> providers = new java.util.HashMap<>();
+        Map<String, StorageProviderFactory> providers = new HashMap<>();
         for (String scheme : SCHEMES) {
             providers.put(scheme, factory);
         }
