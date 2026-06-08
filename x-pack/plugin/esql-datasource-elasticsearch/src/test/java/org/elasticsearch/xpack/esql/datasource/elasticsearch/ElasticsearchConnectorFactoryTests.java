@@ -92,12 +92,47 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         factory.validateConfig("es://remote:9200/logs", Map.of("api_key", "secret"));
     }
 
+    public void testValidateConfigAcceptsTimeoutOverrides() {
+        factory.validateConfig(
+            "es://remote:9200/logs",
+            Map.of("api_key", "secret", "connect_timeout_millis", 5000, "socket_timeout_millis", 30000)
+        );
+    }
+
     public void testValidateConfigRejectsUnknownKey() {
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
             () -> factory.validateConfig("es://remote:9200/logs", Map.of("bogus", "x"))
         );
         assertTrue(e.getMessage().contains("unknown option"));
+    }
+
+    public void testParseLocationRejectsLinkLocalIpv4Literal() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> ElasticsearchConnectorFactory.parseLocation("es://169.254.169.254:9200/logs")
+        );
+        assertTrue(e.getMessage().contains("link-local addresses are not allowed"));
+    }
+
+    public void testParseLocationRejectsLinkLocalIpv6Literal() {
+        IllegalArgumentException e = expectThrows(
+            IllegalArgumentException.class,
+            () -> ElasticsearchConnectorFactory.parseLocation("es://[fe80::1]:9200/logs")
+        );
+        assertTrue(e.getMessage().contains("link-local addresses are not allowed"));
+    }
+
+    public void testParseLocationAllowsPrivateIpv4Literal() {
+        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation("es://10.0.0.5:9200/logs");
+        assertEquals("http://10.0.0.5:9200", endpoint.baseUrl());
+        assertEquals("logs", endpoint.target());
+    }
+
+    public void testParseLocationAllowsLoopbackLiteral() {
+        ElasticsearchConnectorFactory.Endpoint endpoint = ElasticsearchConnectorFactory.parseLocation("es://127.0.0.1:9200/logs");
+        assertEquals("http://127.0.0.1:9200", endpoint.baseUrl());
+        assertEquals("logs", endpoint.target());
     }
 
     public void testOpenRequiresEndpoint() {

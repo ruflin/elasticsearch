@@ -198,6 +198,21 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         return value instanceof BytesRef br ? br.utf8ToString() : value.toString();
     }
 
+    /**
+     * Renders a string literal as a quoted remote ES|QL value, or empty if it contains an ISO control
+     * character (U+0000-U+001F, U+007F-U+009F). Returning empty only suppresses <em>pushdown</em> of this
+     * predicate; the local {@code FilterExec} still applies it, so results stay correct — a legitimate value
+     * containing e.g. a tab is matched locally rather than risking an unescaped control char in the remote
+     * query string. This conservative-but-correct behaviour is a deliberate v1 trade-off.
+     */
+    /**
+     * Renders a string literal as a quoted remote ES|QL value, or empty if it contains an ISO control
+     * character (U+0000–U+001F, U+007F–U+009F). Returning empty only declines to <em>push down</em> the
+     * comparison; the unpushed predicate stays in the local {@code FilterExec} and is still applied, so the
+     * result is identical — only more rows cross the wire. Control characters (including {@code \t}) are not
+     * pushed because their handling in a re-rendered remote query string is not guaranteed identical; this is
+     * a deliberate v1 correctness-over-coverage trade-off.
+     */
     private static Optional<String> quoteString(String value) {
         for (int i = 0; i < value.length(); i++) {
             if (Character.isISOControl(value.charAt(i))) {

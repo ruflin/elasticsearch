@@ -120,6 +120,21 @@ public class EsqlTypeMappingTests extends ESTestCase {
         }
     }
 
+    public void testDatetimeBlockFromNumericEpochString() {
+        // A bare numeric string is epoch millis and must still decode after ISO-8601 parsing fails.
+        try (Block block = EsqlTypeMapping.toBlock(DataType.DATETIME, List.of("1700000000000"), 1, blockFactory)) {
+            assertThat(block, instanceOf(LongBlock.class));
+            assertEquals(1700000000000L, ((LongBlock) block).getLong(0));
+        }
+    }
+
+    public void testDateNanosBlockFromIso8601String() {
+        try (Block block = EsqlTypeMapping.toBlock(DataType.DATE_NANOS, List.of("2023-11-14T22:13:20.000000123Z"), 1, blockFactory)) {
+            assertThat(block, instanceOf(LongBlock.class));
+            assertEquals(1700000000000000123L, ((LongBlock) block).getLong(0));
+        }
+    }
+
     public void testRaggedColumnFillsMissingPositionsWithNull() {
         // rowCount (3) exceeds this column's length (1); missing positions must decode to null, not throw.
         try (Block block = EsqlTypeMapping.toBlock(DataType.KEYWORD, List.of("a"), 3, blockFactory)) {

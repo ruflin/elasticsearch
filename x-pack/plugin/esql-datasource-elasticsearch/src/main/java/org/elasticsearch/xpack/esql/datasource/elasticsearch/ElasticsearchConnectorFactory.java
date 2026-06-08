@@ -9,10 +9,18 @@ package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.apache.http.Header;
 import org.apache.http.HttpHost;
+import org.apache.http.conn.DnsResolver;
+import org.apache.http.impl.conn.SystemDefaultDnsResolver;
+import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
+import org.apache.http.impl.nio.conn.PoolingNHttpClientConnectionManager;
+import org.apache.http.impl.nio.reactor.DefaultConnectingIOReactor;
+import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.message.BasicHeader;
+import org.apache.http.nio.reactor.IOReactorException;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
+import org.elasticsearch.common.network.InetAddresses;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -51,10 +59,12 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     static final String CONFIG_ENDPOINT = "endpoint";
     static final String CONFIG_TARGET = "target";
     static final String CONFIG_API_KEY = "api_key";
+    static final String CONFIG_CONNECT_TIMEOUT_MILLIS = "connect_timeout_millis";
+    static final String CONFIG_SOCKET_TIMEOUT_MILLIS = "socket_timeout_millis";
 
     static final int DEFAULT_PORT = 9200;
-    private static final int CONNECT_TIMEOUT_MILLIS = 10_000;
-    private static final int SOCKET_TIMEOUT_MILLIS = 60_000;
+    static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 10_000;
+    static final int DEFAULT_SOCKET_TIMEOUT_MILLIS = 60_000;
     private static final int CONNECTION_REQUEST_TIMEOUT_MILLIS = 10_000;
 
     @Override
@@ -78,7 +88,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     @Override
     public void validateConfig(String location, Map<String, Object> config) {
-        ConfigKeyValidator.check(config, List.of(Set.of(CONFIG_API_KEY)));
+        ConfigKeyValidator.check(config, List.of(Set.of(CONFIG_API_KEY, CONFIG_CONNECT_TIMEOUT_MILLIS, CONFIG_SOCKET_TIMEOUT_MILLIS)));
     }
 
     @Override
@@ -113,7 +123,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         validateConfig(location, config);
         Endpoint endpoint = parseLocation(location);
         String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);
-        try (RestClient client = buildClient(endpoint.baseUrl(), apiKey)) {
+        try (RestClient client = buildClient(endpoint.baseUrl(), apiKey, config)) {
             List<Attribute> attributes = resolveSchema(client, endpoint.target());
             Map<String, Object> resolvedConfig = new HashMap<>();
             resolvedConfig.put(CONFIG_ENDPOINT, endpoint.baseUrl());
@@ -131,21 +141,99 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
             throw new IllegalArgumentException("Elasticsearch connector requires '" + CONFIG_ENDPOINT + "' in config");
         }
         String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);
-        return new ElasticsearchConnector(buildClient(baseUrl, apiKey));
+        return new ElasticsearchConnector(buildClient(baseUrl, apiKey, config));
     }
 
-    private static RestClient buildClient(String baseUrl, String apiKey) {
+    /**
+     * Builds the low-level {@link RestClient} used to talk to the remote cluster.
+     * <p>
+     * A custom {@link DnsResolver} runs the {@link #rejectLinkLocal link-local guard} against the addresses the
+     * host actually resolves to <em>each time a connection is opened</em>. This closes the DNS-rebinding window that
+     * the literal-IP check in {@link #rejectPrivateHost} cannot cover: a hostname that passed registration can still
+     * resolve to {@code 169.254.169.254} (the cloud instance-metadata service) later, and without this guard the API
+     * key would be sent there. Validating the resolved address — not just the spelled-out host — is the only reliable
+     * defence. The resolver is wired in through a {@link PoolingNHttpClientConnectionManager} because the async client
+     * builder (unlike the synchronous one) has no {@code setDnsResolver} shortcut.
+     * <p>
+     * Connect and socket timeouts default to {@value #DEFAULT_CONNECT_TIMEOUT_MILLIS}ms /
+     * {@value #DEFAULT_SOCKET_TIMEOUT_MILLIS}ms but can be overridden per data source / query via the
+     * {@value #CONFIG_CONNECT_TIMEOUT_MILLIS} and {@value #CONFIG_SOCKET_TIMEOUT_MILLIS} config keys, so a slow remote
+     * cluster or an expensive aggregation does not time out under the defaults.
+     * <p>
+     * <b>v1 limitations.</b> A fresh client (and thus a fresh HTTP connection pool) is built per schema resolution and
+     * per query execution; clients are not pooled or reused across queries to the same endpoint, so each query pays a
+     * TCP+TLS setup cost. HTTPS uses the default JVM trust store only — there is no hook yet for a custom CA, disabling
+     * verification, or client-certificate auth, so self-hosted clusters behind a private CA are not reachable. Both are
+     * tracked for a follow-up.
+     */
+    private static RestClient buildClient(String baseUrl, String apiKey, Map<String, Object> config) {
+        int connectTimeout = intConfig(config, CONFIG_CONNECT_TIMEOUT_MILLIS, DEFAULT_CONNECT_TIMEOUT_MILLIS);
+        int socketTimeout = intConfig(config, CONFIG_SOCKET_TIMEOUT_MILLIS, DEFAULT_SOCKET_TIMEOUT_MILLIS);
         var builder = RestClient.builder(HttpHost.create(baseUrl));
         builder.setRequestConfigCallback(
-            requestConfig -> requestConfig.setConnectTimeout(CONNECT_TIMEOUT_MILLIS)
-                .setSocketTimeout(SOCKET_TIMEOUT_MILLIS)
+            requestConfig -> requestConfig.setConnectTimeout(connectTimeout)
+                .setSocketTimeout(socketTimeout)
                 .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT_MILLIS)
         );
+        builder.setHttpClientConfigCallback(ElasticsearchConnectorFactory::installLinkLocalSafeDnsResolver);
         if (apiKey != null) {
             builder.setDefaultHeaders(new Header[] { new BasicHeader("Authorization", "ApiKey " + apiKey) });
         }
         return builder.build();
     }
+
+    /**
+     * Replaces the async client's connection manager with one whose {@link DnsResolver} rejects link-local
+     * resolved addresses, so the SSRF guard runs against the address actually dialled (see {@link #buildClient}).
+     * The default connection factory and scheme-strategy registry are used (the {@code null} factory argument),
+     * so the standard HTTP/HTTPS session strategies — including the default JVM TLS strategy — stay in place.
+     */
+    private static HttpAsyncClientBuilder installLinkLocalSafeDnsResolver(HttpAsyncClientBuilder httpClientBuilder) {
+        try {
+            PoolingNHttpClientConnectionManager connectionManager = new PoolingNHttpClientConnectionManager(
+                new DefaultConnectingIOReactor(IOReactorConfig.DEFAULT),
+                null,
+                LINK_LOCAL_SAFE_DNS_RESOLVER
+            );
+            httpClientBuilder.setConnectionManager(connectionManager);
+            return httpClientBuilder;
+        } catch (IOReactorException e) {
+            throw new UncheckedIOException("Failed to set up Elasticsearch connector HTTP client", e);
+        }
+    }
+
+    private static int intConfig(Map<String, Object> config, String key, int defaultValue) {
+        Object value = config.get(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        try {
+            return Integer.parseInt(value.toString());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Elasticsearch connector option [" + key + "] must be an integer, got [" + value + "]");
+        }
+    }
+
+    /**
+     * DNS resolver that delegates to the system resolver and then rejects the lookup if any resolved address is
+     * link-local. Installed on every client so the SSRF guard runs against the address actually dialled, defeating
+     * DNS-rebinding where a benign-looking hostname resolves to a metadata-service address at connection time.
+     */
+    private static final DnsResolver LINK_LOCAL_SAFE_DNS_RESOLVER = new DnsResolver() {
+        private final SystemDefaultDnsResolver delegate = SystemDefaultDnsResolver.INSTANCE;
+
+        @Override
+        public InetAddress[] resolve(String host) throws UnknownHostException {
+            InetAddress[] addresses = delegate.resolve(host);
+            for (InetAddress address : addresses) {
+                rejectLinkLocal(address, host);
+            }
+            return addresses;
+        }
+    };
 
     private static List<Attribute> resolveSchema(RestClient client, String target) throws IOException {
         // Same validation/quoting as a real query so a crafted target can't inject into the schema probe.
@@ -220,26 +308,43 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
      * network-internal Elasticsearch cluster is a legitimate use case. Link-local is the one range
      * that has no legitimate ES endpoint but is universally reachable on cloud hosts.
      * <p>
-     * Only literal IP addresses are checked; hostnames are allowed through because resolving them here
-     * would require a DNS round-trip at dataset-registration time.
+     * This is a fail-fast pre-check for literal IPs only. Hostnames are intentionally not resolved here
+     * (that would add a DNS round-trip at registration time, and the answer could change before the query
+     * runs anyway). The authoritative guard against both hostnames and DNS rebinding is the connection-time
+     * {@link #LINK_LOCAL_SAFE_DNS_RESOLVER}, which checks the address actually dialled.
      */
     private static void rejectPrivateHost(String host, String location) {
-        // Only check literal IP addresses (IPv4: digits-and-dots; IPv6: contains a colon).
-        boolean isIpLiteral = host.matches("\\d+\\.\\d+\\.\\d+\\.\\d+.*") || host.contains(":");
-        if (isIpLiteral == false) {
+        // Fast pre-check: only attempt a parse for things that look like IP literals (IPv4 dotted-quad or
+        // a bracketed/colon IPv6 literal). InetAddresses.isInetAddress avoids the fragile hand-rolled regex
+        // and never triggers a DNS lookup, so a genuine hostname is left for the connection-time resolver.
+        boolean looksLikeIpLiteral = (host.indexOf(':') >= 0 || host.matches("\\d{1,3}(\\.\\d{1,3}){3}"))
+            && InetAddresses.isInetAddress(stripBrackets(host));
+        if (looksLikeIpLiteral == false) {
             return;
         }
-        try {
-            InetAddress addr = InetAddress.getByName(host);
-            if (addr.isLinkLocalAddress()) {
-                throw new IllegalArgumentException(
-                    "Invalid Elasticsearch location ["
-                        + location
-                        + "]: link-local addresses are not allowed (they map to cloud metadata services)"
-                );
-            }
-        } catch (UnknownHostException e) {
-            // Malformed IP literal — connection will fail at query time with a clear error.
+        rejectLinkLocal(InetAddresses.forString(stripBrackets(host)), location);
+    }
+
+    /** Strips the surrounding brackets from a bracketed IPv6 literal ({@code [::1]} -> {@code ::1}). */
+    private static String stripBrackets(String host) {
+        if (host.length() >= 2 && host.charAt(0) == '[' && host.charAt(host.length() - 1) == ']') {
+            return host.substring(1, host.length() - 1);
+        }
+        return host;
+    }
+
+    /**
+     * Throws if {@code address} is link-local (169.254.0.0/16, fe80::/10), the range used by cloud
+     * instance-metadata services. Shared by the registration-time literal-IP pre-check and the
+     * connection-time DNS resolver so both apply identical policy.
+     */
+    private static void rejectLinkLocal(InetAddress address, String origin) {
+        if (address.isLinkLocalAddress()) {
+            throw new IllegalArgumentException(
+                "Invalid Elasticsearch location ["
+                    + origin
+                    + "]: link-local addresses are not allowed (they map to cloud metadata services)"
+            );
         }
     }
 
