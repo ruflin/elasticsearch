@@ -8,9 +8,11 @@
 package org.elasticsearch.xpack.esql.action;
 
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.cluster.metadata.DatasetMetadata;
 import org.elasticsearch.common.network.NetworkModule;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.IOUtils;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.http.HttpServerTransport;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -18,6 +20,9 @@ import org.elasticsearch.test.InternalTestCluster;
 import org.elasticsearch.test.NodeConfigurationSource;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
+import org.elasticsearch.xpack.esql.datasources.datasource.GetDataSourceAction;
+import org.elasticsearch.xpack.esql.datasources.datasource.PutDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.TestEncryptionServicePlugin;
 import org.junit.After;
 import org.junit.Before;
@@ -29,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
@@ -59,6 +65,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
     protected Collection<Class<? extends Plugin>> nodePlugins() {
         List<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
         plugins.add(ElasticsearchDataSourcePlugin.class);
+        plugins.add(TestEncryptionServicePlugin.class);
         return plugins;
     }
 
@@ -123,6 +130,34 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows, hasItem(List.of("alice", 30L)));
         assertThat(rows, hasItem(List.of("bob", 35L)));
         assertThat(rows, hasItem(List.of("carol", 40L)));
+    }
+
+    public void testPutDataSourceAcceptsElasticsearchType() throws Exception {
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+        assumeTrue("requires external data sources feature flag", DatasetMetadata.ESQL_EXTERNAL_DATASOURCES_FEATURE_FLAG.isEnabled());
+
+        TimeValue timeout = TimeValue.timeValueSeconds(10);
+        String name = "test_es_connector_ds";
+        assertTrue(
+            "put data source acknowledged",
+            client().execute(
+                PutDataSourceAction.INSTANCE,
+                new PutDataSourceAction.Request(timeout, timeout, name, "elasticsearch", null, Map.of("api_key", "test-api-key"))
+            ).actionGet(timeout).isAcknowledged()
+        );
+        try {
+            GetDataSourceAction.Response response = client().execute(
+                GetDataSourceAction.INSTANCE,
+                new GetDataSourceAction.Request(timeout, new String[] { name })
+            ).actionGet(timeout);
+            assertThat(response.getDataSources().size(), equalTo(1));
+            assertThat(response.getDataSources().iterator().next().type(), equalTo("elasticsearch"));
+        } finally {
+            client().execute(
+                DeleteDataSourceAction.INSTANCE,
+                new DeleteDataSourceAction.Request(timeout, timeout, new String[] { name })
+            ).actionGet(timeout);
+        }
     }
 
     // The filter/limit assertions below verify end-to-end correctness with pushdown enabled. They do

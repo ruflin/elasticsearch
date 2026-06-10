@@ -49,4 +49,33 @@ public record ExternalOptimizerContext(FormatReaderRegistry formatReaderRegistry
      * unset on the parent context.
      */
     public static final ExternalOptimizerContext NONE = new ExternalOptimizerContext(null, Map.of());
+
+    /**
+     * Returns the factory registered for {@code sourceType}, or {@code null} when the type is
+     * unknown or null. Callers can chain capability checks without repeating the lookup.
+     */
+    public ExternalSourceFactory factoryFor(String sourceType) {
+        if (sourceType == null) {
+            return null;
+        }
+        return sourceFactories.get(sourceType);
+    }
+
+    /**
+     * Returns {@code true} when the connector for {@code sourceType} supports sort pushdown.
+     * Convenience over {@link #factoryFor(String)} + {@link ExternalSourceFactory#sortPushdownSupported()}.
+     */
+    public boolean sortPushdownSupported(String sourceType) {
+        ExternalSourceFactory factory = factoryFor(sourceType);
+        return factory != null && factory.sortPushdownSupported();
+    }
+
+    /**
+     * Returns {@code true} when the connector for {@code sourceType} supports aggregate pushdown.
+     * Convenience over {@link #factoryFor(String)} + {@link ExternalSourceFactory#aggregatePushdownSupported()}.
+     */
+    public boolean aggregatePushdownSupported(String sourceType) {
+        ExternalSourceFactory factory = factoryFor(sourceType);
+        return factory != null && factory.aggregatePushdownSupported();
+    }
 }

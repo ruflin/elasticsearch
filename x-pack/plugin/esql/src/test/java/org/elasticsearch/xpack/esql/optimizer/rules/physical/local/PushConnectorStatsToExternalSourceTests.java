@@ -25,6 +25,7 @@ import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
+import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.Equals;
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
@@ -126,6 +127,33 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
     public void testNotPushedWhenConnectorDoesNotSupportAggregates() {
         AggregateExec agg = singleAggregate(connectorSource(), countStar());
         PhysicalPlan result = applyRule(agg, false);
+        assertThat(result, instanceOf(AggregateExec.class));
+    }
+
+    public void testNotPushedWhenSortAlreadyPushed() {
+        // A source with a pushed sort cannot also receive a pushed aggregate: the sort changes the row set
+        // the remote aggregates over, relative to what the surviving plan expects.
+        Order sortOrder = new Order(Source.EMPTY, MESSAGE, Order.OrderDirection.ASC, Order.NullsPosition.LAST);
+        ExternalSourceExec ext = connectorSource().withPushedSort(List.of(sortOrder));
+        AggregateExec agg = singleAggregate(ext, countStar());
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(AggregateExec.class));
+    }
+
+    public void testNotPushedWhenAggregatesAlreadyPushed() {
+        // A source that already carries a pushed aggregate must not be annotated a second time.
+        ExternalSourceExec ext = connectorSource().withPushedAggregate(
+            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(),
+            List.of(referenceAttribute("c", DataType.LONG)),
+            false
+        );
+        AggregateExec agg = singleAggregate(ext, countStar());
+
+        PhysicalPlan result = applyRule(agg, true);
+
         assertThat(result, instanceOf(AggregateExec.class));
     }
 
