@@ -132,4 +132,27 @@ public record QueryRequest(
             blockFactory
         );
     }
+
+    /**
+     * Builds a connector {@link QueryRequest} from a {@link SourceOperatorContext}, forwarding the
+     * pushdown fields ({@code pushedSort}, {@code pushedAggregates}, {@code pushedGroupings},
+     * {@code aggregateIntermediateState}) that exist on both records. The {@code target} and
+     * {@code projectedColumns} are derived by the caller from the context's config / split.
+     */
+    public static QueryRequest forConnector(String target, List<String> projectedColumns, SourceOperatorContext context) {
+        return new QueryRequest(
+            target,
+            projectedColumns,
+            context.attributes(),
+            context.config(),
+            context.batchSize(),
+            context.rowLimit(),
+            context.pushedExpressions(),
+            context.pushedSort(),
+            context.pushedAggregates(),
+            context.pushedGroupings(),
+            context.aggregateIntermediateState(),
+            null
+        );
+    }
 }

@@ -81,25 +81,7 @@ public class OperatorFactoryRegistry {
                 // fall back to the full path string for connectors that don't set it.
                 Object targetObj = context.config().get("target");
                 String target = targetObj != null ? targetObj.toString() : context.path().toString();
-                // QueryRequest carries the still-encrypted config; connectors take secrets from open(), not request.config().
-                // The pushed row limit (FormatReader.NO_LIMIT when absent), pushed filter expressions, and pushed sort keys
-                // are forwarded so connectors can apply them remotely (e.g. append SORT / LIMIT / WHERE to a remote query)
-                // instead of pulling the full result set. pushedExpressions/pushedSort are empty unless the optimizer pushed
-                // filters/sort to this connector.
-                QueryRequest request = new QueryRequest(
-                    target,
-                    projectedColumns,
-                    context.attributes(),
-                    context.config(),
-                    context.batchSize(),
-                    context.rowLimit(),
-                    context.pushedExpressions(),
-                    context.pushedSort(),
-                    context.pushedAggregates(),
-                    context.pushedGroupings(),
-                    context.aggregateIntermediateState(),
-                    null
-                );
+                QueryRequest request = QueryRequest.forConnector(target, projectedColumns, context);
                 return new AsyncConnectorSourceOperatorFactory(connector, request, context.maxBufferSize(), executor, context.sliceQueue());
             }
             SourceOperatorFactoryProvider opFactory = sf.operatorFactory();
