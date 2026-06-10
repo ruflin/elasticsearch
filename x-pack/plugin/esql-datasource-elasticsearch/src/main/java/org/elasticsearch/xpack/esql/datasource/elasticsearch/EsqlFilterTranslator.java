@@ -176,7 +176,8 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
             case ">=" -> "<=";
             case "<" -> ">";
             case "<=" -> ">=";
-            default -> symbol; // == and != are symmetric
+            case "==", "!=" -> symbol;
+            default -> throw new IllegalStateException("Unexpected comparison symbol: " + symbol);
         };
     }
 
@@ -198,13 +199,6 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         return value instanceof BytesRef br ? br.utf8ToString() : value.toString();
     }
 
-    /**
-     * Renders a string literal as a quoted remote ES|QL value, or empty if it contains an ISO control
-     * character (U+0000-U+001F, U+007F-U+009F). Returning empty only suppresses <em>pushdown</em> of this
-     * predicate; the local {@code FilterExec} still applies it, so results stay correct — a legitimate value
-     * containing e.g. a tab is matched locally rather than risking an unescaped control char in the remote
-     * query string. This conservative-but-correct behaviour is a deliberate v1 trade-off.
-     */
     /**
      * Renders a string literal as a quoted remote ES|QL value, or empty if it contains an ISO control
      * character (U+0000–U+001F, U+007F–U+009F). Returning empty only declines to <em>push down</em> the

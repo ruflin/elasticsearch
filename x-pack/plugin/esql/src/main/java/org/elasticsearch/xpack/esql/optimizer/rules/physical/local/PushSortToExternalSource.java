@@ -96,7 +96,7 @@ public class PushSortToExternalSource extends PhysicalOptimizerRules.Parameteriz
      * foldable non-negative integer literal so the caller leaves the plan untouched.
      */
     private static int foldLimit(Expression limitExpr, LocalPhysicalOptimizerContext ctx) {
-        if (limitExpr instanceof Literal == false || limitExpr.foldable() == false) {
+        if (limitExpr instanceof Literal == false) {
             return FormatReader.NO_LIMIT;
         }
         Object folded = limitExpr.fold(ctx.foldCtx());

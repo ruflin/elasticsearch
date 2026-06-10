@@ -314,23 +314,13 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
      * {@link #LINK_LOCAL_SAFE_DNS_RESOLVER}, which checks the address actually dialled.
      */
     private static void rejectPrivateHost(String host, String location) {
-        // Fast pre-check: only attempt a parse for things that look like IP literals (IPv4 dotted-quad or
-        // a bracketed/colon IPv6 literal). InetAddresses.isInetAddress avoids the fragile hand-rolled regex
-        // and never triggers a DNS lookup, so a genuine hostname is left for the connection-time resolver.
-        boolean looksLikeIpLiteral = (host.indexOf(':') >= 0 || host.matches("\\d{1,3}(\\.\\d{1,3}){3}"))
-            && InetAddresses.isInetAddress(stripBrackets(host));
-        if (looksLikeIpLiteral == false) {
+        // URI.getHost() already strips IPv6 brackets, so InetAddresses.isInetAddress() can parse host
+        // directly. It returns false for hostnames without triggering a DNS lookup, so genuine hostnames
+        // are left for the connection-time resolver.
+        if (InetAddresses.isInetAddress(host) == false) {
             return;
         }
-        rejectLinkLocal(InetAddresses.forString(stripBrackets(host)), location);
-    }
-
-    /** Strips the surrounding brackets from a bracketed IPv6 literal ({@code [::1]} -> {@code ::1}). */
-    private static String stripBrackets(String host) {
-        if (host.length() >= 2 && host.charAt(0) == '[' && host.charAt(host.length() - 1) == ']') {
-            return host.substring(1, host.length() - 1);
-        }
-        return host;
+        rejectLinkLocal(InetAddresses.forString(host), location);
     }
 
     /**

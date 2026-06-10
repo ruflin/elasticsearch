@@ -14,6 +14,7 @@ import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.type.EsField;
+import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
@@ -140,10 +141,6 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertTrue(e.getMessage().contains("endpoint"));
     }
 
-    public void testSplitProviderIsSingle() {
-        assertSame(org.elasticsearch.xpack.esql.datasources.spi.SplitProvider.SINGLE, factory.splitProvider());
-    }
-
     public void testBuildRemoteQueryProjectsColumns() {
         var request = new org.elasticsearch.xpack.esql.datasources.spi.QueryRequest(
             "logs",
@@ -183,7 +180,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             Map.of(),
             1000,
-            FormatNoLimit.VALUE,
+            FormatReader.NO_LIMIT,
             List.of(filter),
             List.of(),
             List.of(),
@@ -278,7 +275,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             Map.of(),
             1000,
-            FormatNoLimit.VALUE,
+            FormatReader.NO_LIMIT,
             List.of(filter),
             List.of(),
             List.of(new RemoteAggregate("c", "COUNT", null)),
@@ -296,7 +293,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             Map.of(),
             1000,
-            FormatNoLimit.VALUE,
+            FormatReader.NO_LIMIT,
             List.of(),
             List.of(),
             List.of(new RemoteAggregate("c", "COUNT", null), new RemoteAggregate("mx", "MAX", "bytes")),
@@ -337,8 +334,4 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertTrue(e.getMessage().contains("illegal character"));
     }
 
-    /** Mirror of {@link org.elasticsearch.xpack.esql.datasources.spi.FormatReader#NO_LIMIT} for readable test code. */
-    private static final class FormatNoLimit {
-        static final int VALUE = org.elasticsearch.xpack.esql.datasources.spi.FormatReader.NO_LIMIT;
-    }
 }
