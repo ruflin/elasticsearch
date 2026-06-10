@@ -155,10 +155,24 @@ public class EsqlTypeMappingTests extends ESTestCase {
         }
     }
 
-    public void testUndecodableTypeThrows() {
+    public void testSpatialAndUnsignedLongDecodeAsNullBlock() {
+        // Spatial types and unsigned_long are valid remote column types not yet decoded;
+        // they must surface as null rather than crashing queries that project these columns.
+        for (DataType type : new DataType[] {
+            DataType.GEO_POINT, DataType.GEO_SHAPE, DataType.CARTESIAN_POINT, DataType.CARTESIAN_SHAPE,
+            DataType.GEOHEX, DataType.GEOHASH, DataType.GEOTILE, DataType.UNSIGNED_LONG }) {
+            try (Block block = EsqlTypeMapping.toBlock(type, List.of("ignored"), 2, blockFactory)) {
+                assertTrue("expected all-null block for " + type, block.areAllValuesNull());
+                assertEquals(2, block.getPositionCount());
+            }
+        }
+    }
+
+    public void testTrulyUndecodableTypeThrows() {
+        // FLOAT is never emitted by the remote ES|QL server, so an IllegalArgumentException is correct.
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
-            () -> EsqlTypeMapping.toBlock(DataType.GEO_POINT, List.of(), 0, blockFactory)
+            () -> EsqlTypeMapping.toBlock(DataType.FLOAT, List.of(), 0, blockFactory)
         );
         assertTrue(e.getMessage().contains("Unsupported remote Elasticsearch column type"));
     }

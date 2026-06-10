@@ -160,7 +160,6 @@ class ElasticsearchConnector implements Connector {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private ResultCursor parseResponse(Response response, QueryRequest request) {
         BlockFactory blockFactory = request.blockFactory();
         List<EsqlTypeMapping.RemoteColumn> columns = new ArrayList<>();
@@ -197,6 +196,10 @@ class ElasticsearchConnector implements Connector {
             rowCount = Math.max(rowCount, col.size());
         }
 
+        if (rowCount == 0) {
+            return new SinglePageCursor(null);
+        }
+
         boolean intermediateAggregateState = request.aggregateIntermediateState()
             && request.pushedAggregates() != null
             && request.pushedAggregates().isEmpty() == false;
@@ -204,8 +207,7 @@ class ElasticsearchConnector implements Connector {
             ? buildIntermediateAggregateBlocks(columns, columnValues, rowCount, blockFactory, request)
             : buildPassthroughBlocks(columns, columnValues, rowCount, blockFactory);
 
-        Page page = rowCount == 0 ? null : new Page(rowCount, blocks);
-        return new SinglePageCursor(page);
+        return new SinglePageCursor(new Page(rowCount, blocks));
     }
 
     /** Decodes each remote column to a block in response order (the result is the connector's output as-is). */

@@ -1196,7 +1196,7 @@ public class ComputeService {
                         plan,
                         SearchContextStats.from(localContexts),
                         formatReaderRegistry,
-                        operatorFactoryRegistry.sourceFactories(),
+                        sourceFactories(),
                         coordinatorExternalSplits,
                         planTimeProfile
                     );
