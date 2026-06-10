@@ -7,32 +7,15 @@
 
 package org.elasticsearch.xpack.esql.action;
 
-import org.apache.http.HttpHost;
-import org.apache.http.message.BasicHeader;
-import org.elasticsearch.client.Request;
-import org.elasticsearch.client.Response;
-import org.elasticsearch.client.RestClient;
 import org.elasticsearch.cluster.metadata.DatasetMetadata;
-import org.elasticsearch.common.Strings;
 import org.elasticsearch.core.TimeValue;
-import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
-import org.elasticsearch.xcontent.XContentParser;
-import org.elasticsearch.xcontent.XContentParserConfiguration;
-import org.elasticsearch.xcontent.json.JsonXContent;
-import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
 import org.elasticsearch.xpack.esql.datasources.dataset.DeleteDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.dataset.PutDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.PutDataSourceAction;
-import org.elasticsearch.xpack.esql.datasources.datasource.TestEncryptionServicePlugin;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -61,20 +44,9 @@ import static org.hamcrest.Matchers.greaterThan;
  * The test self-skips when {@code tests.esql.remote.url} is not set, so it never runs (or fails) in CI.
  */
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.SUITE, numDataNodes = 1, numClientNodes = 0, supportsDedicatedMasters = false)
-public class ElasticsearchNamedDataSourceLiveIT extends AbstractEsqlIntegTestCase {
+public class ElasticsearchNamedDataSourceLiveIT extends AbstractElasticsearchLiveIT {
 
-    private static final String URL = System.getProperty("tests.esql.remote.url");
-    private static final String API_KEY = System.getProperty("tests.esql.remote.apikey");
-    private static final String TARGET = System.getProperty("tests.esql.remote.target", "logs*");
     private static final TimeValue TIMEOUT = TimeValue.timeValueSeconds(30);
-
-    @Override
-    protected Collection<Class<? extends Plugin>> nodePlugins() {
-        List<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
-        plugins.add(ElasticsearchDataSourcePlugin.class);
-        plugins.add(TestEncryptionServicePlugin.class);
-        return plugins;
-    }
 
     public void testNamedDataSourceMatchesDirect() throws Exception {
         assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
@@ -133,50 +105,14 @@ public class ElasticsearchNamedDataSourceLiveIT extends AbstractEsqlIntegTestCas
     private static void safeDelete(Runnable delete) {
         try {
             delete.run();
-        } catch (Exception ignored) {
-            // best-effort cleanup; a missing source/dataset is fine
+        } catch (Exception e) {
+            logger.warn("Failed to delete test resource during cleanup (ignored)", e);
         }
     }
 
     private List<List<Object>> runDataset(String query) {
         try (var response = run(syncEsqlQueryRequest(query))) {
-            List<List<Object>> rows = new ArrayList<>();
-            for (Iterator<Iterator<Object>> it = response.values(); it.hasNext();) {
-                List<Object> row = new ArrayList<>();
-                it.next().forEachRemaining(row::add);
-                rows.add(row);
-            }
-            return rows;
+            return collectRows(response);
         }
-    }
-
-    /** Runs the query straight against the remote {@code _query} API with the configured API key. */
-    @SuppressWarnings("unchecked")
-    private List<List<Object>> directValues(String esql) throws IOException {
-        var builder = RestClient.builder(HttpHost.create(URL));
-        if (API_KEY != null) {
-            builder.setDefaultHeaders(new org.apache.http.Header[] { new BasicHeader("Authorization", "ApiKey " + API_KEY) });
-        }
-        try (RestClient client = builder.build()) {
-            Request request = new Request("POST", "/_query");
-            request.addParameter("format", "json");
-            request.setJsonEntity(Strings.format("{\"query\":%s}", quote(esql)));
-            Response response = client.performRequest(request);
-            try (
-                InputStream content = response.getEntity().getContent();
-                XContentParser parser = JsonXContent.jsonXContent.createParser(XContentParserConfiguration.EMPTY, content)
-            ) {
-                Map<String, Object> body = parser.map();
-                List<List<Object>> rows = new ArrayList<>();
-                for (Object rowObj : (List<Object>) body.getOrDefault("values", List.of())) {
-                    rows.add((List<Object>) rowObj);
-                }
-                return rows;
-            }
-        }
-    }
-
-    private static String quote(String s) {
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 }

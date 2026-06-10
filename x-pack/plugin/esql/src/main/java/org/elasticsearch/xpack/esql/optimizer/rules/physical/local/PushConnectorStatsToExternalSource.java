@@ -13,7 +13,6 @@ import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
-import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.AggregateFunction;
@@ -187,10 +186,6 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
     }
 
     private static boolean aggregatePushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {
-        if (ctx.external() == null || sourceType == null) {
-            return false;
-        }
-        ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
-        return factory != null && factory.aggregatePushdownSupported();
+        return ctx.external() != null && ctx.external().aggregatePushdownSupported(sourceType);
     }
 }

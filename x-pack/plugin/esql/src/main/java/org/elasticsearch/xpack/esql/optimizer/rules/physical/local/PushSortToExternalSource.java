@@ -10,7 +10,6 @@ package org.elasticsearch.xpack.esql.optimizer.rules.physical.local;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.Expressions;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
-import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
@@ -75,11 +74,7 @@ public class PushSortToExternalSource extends PhysicalOptimizerRules.Parameteriz
     }
 
     private static boolean sortPushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {
-        if (ctx.external() == null || sourceType == null) {
-            return false;
-        }
-        ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
-        return factory != null && factory.sortPushdownSupported();
+        return ctx.external() != null && ctx.external().sortPushdownSupported(sourceType);
     }
 
     private static boolean canPushAllSortKeys(List<Order> orders) {

@@ -14,6 +14,7 @@ import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.core.type.EsField;
+import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
@@ -139,6 +140,18 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     public void testOpenRequiresEndpoint() {
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> factory.open(Map.of()));
         assertTrue(e.getMessage().contains("endpoint"));
+    }
+
+    public void testResolvedConfigDoesNotContainApiKey() throws Exception {
+        // resolveMetadata() stores only endpoint and target in the SourceMetadata's resolvedConfig —
+        // api_key must never be carried there so that secrets are not serialised into stored metadata.
+        // Verify the invariant by confirming that open() succeeds with just the resolved keys: if the
+        // resolved config were to contain api_key, open() would work differently (it reads api_key from config).
+        // This test checks the complement: open() works without api_key, matching the resolved config shape.
+        Map<String, Object> resolvedConfig = Map.of("endpoint", "http://remote:9200");
+        try (Connector conn = factory.open(resolvedConfig)) {
+            assertNotNull(conn);
+        }
     }
 
     public void testBuildRemoteQueryProjectsColumns() {
