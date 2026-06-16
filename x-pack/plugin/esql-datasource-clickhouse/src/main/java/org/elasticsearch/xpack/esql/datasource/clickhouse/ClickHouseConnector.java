@@ -15,7 +15,9 @@ import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -90,16 +92,12 @@ class ClickHouseConnector implements Connector {
                 String errorBody = new String(response.body(), StandardCharsets.UTF_8);
                 throw new IOException("ClickHouse returned HTTP " + response.statusCode() + ": " + errorBody);
             }
-            return new ClickHouseResultCursor(
-                new java.io.ByteArrayInputStream(response.body()),
-                request.attributes(),
-                request.blockFactory()
-            );
+            return new ClickHouseResultCursor(new ByteArrayInputStream(response.body()), request.attributes(), request.blockFactory());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while executing ClickHouse query", e);
+            throw new IllegalStateException("Interrupted while executing ClickHouse query", e);
         } catch (IOException e) {
-            throw new RuntimeException("ClickHouse query failed: " + e.getMessage(), e);
+            throw new UncheckedIOException("ClickHouse query failed: " + e.getMessage(), e);
         }
     }
 
@@ -135,7 +133,9 @@ class ClickHouseConnector implements Connector {
 
     @Override
     public void close() {
-        // HttpClient is managed by the JVM; no explicit close needed
+        // HttpClient (Java 21+) owns an internal selector thread and connection pool; closing it
+        // releases those resources. A no-op here would leak a thread per connector instance.
+        httpClient.close();
     }
 
     @Override

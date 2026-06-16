@@ -33,19 +33,21 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Integration tests for the ClickHouse connector. These tests require a running ClickHouse instance.
+ * End-to-end tests for the ClickHouse connector. These exercise schema discovery and querying
+ * against a live ClickHouse instance and are skipped (via {@code assumeTrue}) when the
+ * {@code CLICKHOUSE_URL} environment variable is not set, so the suite is a no-op in normal CI.
  *
- * <p>Set environment variable {@code CLICKHOUSE_URL} to run these tests:
+ * <p>Set the environment variable to run them:
  * <pre>
  *   CLICKHOUSE_URL=clickhouse://localhost:8123/test/employees \
  *     ./gradlew :x-pack:plugin:esql-datasource-clickhouse:test \
- *     --tests "*ClickHouseConnectorIT*"
+ *     --tests "*ClickHouseConnectorTests*"
  * </pre>
  *
  * <p>A Docker Compose file is provided in {@code src/test/resources/docker/} for convenience.
  * Start it with: {@code docker compose -f src/test/resources/docker/docker-compose.yml up -d}
  */
-public class ClickHouseConnectorIT extends ESTestCase {
+public class ClickHouseConnectorTests extends ESTestCase {
 
     private static final String ENV_CLICKHOUSE_URL = "CLICKHOUSE_URL";
     private static final String DEFAULT_USER = "default";

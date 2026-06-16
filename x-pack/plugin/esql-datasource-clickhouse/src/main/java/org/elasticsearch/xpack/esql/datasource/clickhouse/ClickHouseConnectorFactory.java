@@ -103,7 +103,6 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
         String scheme = parsed.tls ? "https" : "http";
         URI uri = URI.create(scheme + "://" + parsed.host + ":" + parsed.port + "/");
 
-        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build();
         HttpRequest request = HttpRequest.newBuilder()
             .uri(uri)
             .header("X-ClickHouse-User", user)
@@ -113,7 +112,9 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
             .timeout(Duration.ofSeconds(60))
             .build();
 
-        try {
+        // Schema discovery is a one-shot call, so the client is closed immediately to release its
+        // internal selector thread rather than relying on JVM finalization.
+        try (HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build()) {
             HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
             if (response.statusCode() != 200) {
                 String errorBody = new String(response.body(), StandardCharsets.UTF_8);
