@@ -38,11 +38,6 @@ dependencies {
   testImplementation project(xpackModule('esql:qa:testFixtures'))
 }
 
-tasks.named("test").configure {
-  // Include integration tests (skipped unless CLICKHOUSE_URL env var is set)
-  include '**/*IT.class'
-}
-
 tasks.named("dependencyLicenses").configure {
   mapping from: /jackson-.*/, to: 'jackson'
 }
