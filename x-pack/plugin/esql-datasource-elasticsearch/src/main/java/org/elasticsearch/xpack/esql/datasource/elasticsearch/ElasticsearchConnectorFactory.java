@@ -19,6 +19,7 @@ import org.apache.http.message.BasicHeader;
 import org.apache.http.nio.reactor.IOReactorException;
 import org.elasticsearch.client.Request;
 import org.elasticsearch.client.Response;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.network.InetAddresses;
 import org.elasticsearch.xcontent.XContentParser;
@@ -38,6 +39,7 @@ import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -129,6 +131,19 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
             resolvedConfig.put(CONFIG_ENDPOINT, endpoint.baseUrl());
             resolvedConfig.put(CONFIG_TARGET, endpoint.target());
             return new SimpleSourceMetadata(attributes, type(), location, null, null, null, resolvedConfig);
+        } catch (ResponseException e) {
+            // The remote answered with a non-2xx (e.g. a missing index, a bad target pattern, or a permissions
+            // problem): surface the remote status and a snippet of its error body so registration / first-query
+            // schema resolution fails with an actionable reason rather than an opaque wrapper.
+            throw new IllegalArgumentException(
+                "Failed to resolve schema for remote Elasticsearch ["
+                    + location
+                    + "]: remote returned ["
+                    + e.getResponse().getStatusLine()
+                    + "]: "
+                    + remoteErrorSnippet(e.getResponse()),
+                e
+            );
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to resolve schema for remote Elasticsearch [" + location + "]", e);
         }
@@ -257,6 +272,27 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         }
         return EsqlTypeMapping.toAttributes(columns);
     }
+
+    /**
+     * Reads the remote error response body as a bounded, single-line snippet for inclusion in a schema-resolution
+     * error message. Returns a placeholder when the body is absent or cannot be read, so error reporting never
+     * throws while reporting an error.
+     */
+    private static String remoteErrorSnippet(Response response) {
+        if (response.getEntity() == null) {
+            return "<no response body>";
+        }
+        try (InputStream content = response.getEntity().getContent()) {
+            byte[] bytes = content.readNBytes(MAX_ERROR_BODY_CHARS);
+            String text = new String(bytes, StandardCharsets.UTF_8).strip().replaceAll("\\s+", " ");
+            return text.isEmpty() ? "<empty response body>" : text;
+        } catch (IOException ioe) {
+            return "<unreadable response body: " + ioe.getMessage() + ">";
+        }
+    }
+
+    /** Upper bound on remote error-body characters included in a schema-resolution error message. */
+    static final int MAX_ERROR_BODY_CHARS = 2048;
 
     /**
      * Parses {@code es://host:port/index} into a base URL and target index.

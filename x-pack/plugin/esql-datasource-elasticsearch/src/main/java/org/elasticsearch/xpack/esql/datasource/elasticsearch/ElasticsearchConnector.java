@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.elasticsearch.client.Response;
+import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
@@ -18,6 +19,8 @@ import org.elasticsearch.xcontent.json.JsonXContent;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalClientException;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalServerException;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
@@ -28,6 +31,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.Split;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -49,16 +53,77 @@ class ElasticsearchConnector implements Connector {
         this.client = client;
     }
 
+    /**
+     * Upper bound on how many characters of the remote error body are included in a surfaced error
+     * message. Remote ES|QL errors (a {@code root_cause}/{@code reason} JSON object) are small, but a
+     * misconfigured remote could return an unbounded HTML error page or stack trace; truncating keeps
+     * the message useful for debugging without flooding logs or the API response.
+     */
+    static final int MAX_ERROR_BODY_CHARS = 2048;
+
     @Override
     public ResultCursor execute(QueryRequest request, Split split) {
         String esqlQuery = buildRemoteQuery(request);
         Response response;
         try {
             response = client.performRequest(RemoteQuery.request(esqlQuery));
+        } catch (ResponseException e) {
+            // The remote cluster answered with a non-2xx status: the query was rejected (e.g. an unsupported
+            // pushed STATS/grouping, an unmapped or non-groupable field, a permissions problem). Surface the
+            // remote status and a bounded snippet of its error body so the failure is actionable instead of an
+            // opaque "failed to run" string, and map the status class through so a remote 5xx is not mislabeled
+            // as a client (400) error.
+            throw remoteErrorException(esqlQuery, e);
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to run remote ES|QL query", e);
+            // A transport-level failure (connection refused, timeout, TLS, DNS): no remote status to forward.
+            throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
         }
         return parseResponse(response, request);
+    }
+
+    /**
+     * Builds the exception for a remote non-2xx response by reading the remote status and error body off the
+     * {@link ResponseException} and delegating to {@link #remoteError}. Kept thin so the message/status-mapping
+     * logic in {@link #remoteError} stays unit-testable without constructing a (package-private) {@link Response}.
+     */
+    private static RuntimeException remoteErrorException(String esqlQuery, ResponseException e) {
+        int statusCode = e.getResponse().getStatusLine().getStatusCode();
+        String statusLine = e.getResponse().getStatusLine().toString();
+        return remoteError(statusCode, statusLine, errorBodySnippet(e.getResponse()), esqlQuery, e);
+    }
+
+    /**
+     * Maps a remote non-2xx response to the matching external-source exception: a remote {@code 5xx} becomes an
+     * {@link ExternalServerException} (500) and anything else (a {@code 4xx} client error such as a bad pushed
+     * query or a permissions failure) becomes an {@link ExternalClientException} (400). The message carries the
+     * remote status line and a snippet of the remote error body plus the rendered ES|QL that was rejected, so the
+     * failure is actionable instead of an opaque "failed to run" string.
+     */
+    static RuntimeException remoteError(int statusCode, String statusLine, String bodySnippet, String esqlQuery, Throwable cause) {
+        String message = "Remote ES|QL query failed with [" + statusLine + "]: " + bodySnippet + " (query [" + esqlQuery + "])";
+        return statusCode >= 500 ? new ExternalServerException(message, cause) : new ExternalClientException(message, cause);
+    }
+
+    /**
+     * Reads the remote error response body as a bounded, single-line snippet for inclusion in an error message.
+     * Returns a placeholder when the body is absent or cannot be read, so error reporting never throws while
+     * reporting an error.
+     */
+    private static String errorBodySnippet(Response response) {
+        if (response.getEntity() == null) {
+            return "<no response body>";
+        }
+        try (InputStream content = response.getEntity().getContent()) {
+            return truncateErrorBody(new String(content.readNBytes(MAX_ERROR_BODY_CHARS), StandardCharsets.UTF_8));
+        } catch (IOException ioe) {
+            return "<unreadable response body: " + ioe.getMessage() + ">";
+        }
+    }
+
+    /** Collapses whitespace and trims a remote error body into a compact single-line snippet for an error message. */
+    static String truncateErrorBody(String body) {
+        String text = body == null ? "" : body.strip().replaceAll("\\s+", " ");
+        return text.isEmpty() ? "<empty response body>" : text;
     }
 
     /**
