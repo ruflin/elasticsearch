@@ -570,6 +570,7 @@ tasks.named("checkPart1").configure {
     ':x-pack:plugin:esql-datasource-compression-libs',
     ':x-pack:plugin:esql-datasource-csv',
     ':x-pack:plugin:esql-datasource-gcs',
+    ':x-pack:plugin:esql-datasource-clickhouse',
     ':x-pack:plugin:esql-datasource-grpc',
     ':x-pack:plugin:esql-datasource-gzip',
     ':x-pack:plugin:esql-datasource-http',
