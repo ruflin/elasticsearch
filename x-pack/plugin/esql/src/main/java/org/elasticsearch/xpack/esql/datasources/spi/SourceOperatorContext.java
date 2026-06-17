@@ -70,7 +70,7 @@ public record SourceOperatorContext(
     DeclaredReadSpec declaredReadSpec,
     List<RemoteSort> pushedSort,
     List<RemoteAggregate> pushedAggregates,
-    List<String> pushedGroupings,
+    List<RemoteGrouping> pushedGroupings,
     boolean aggregateIntermediateState
 ) {
     /**
@@ -337,7 +337,7 @@ public record SourceOperatorContext(
         private DeclaredReadSpec declaredReadSpec = DeclaredReadSpec.NONE;
         private List<RemoteSort> pushedSort;
         private List<RemoteAggregate> pushedAggregates;
-        private List<String> pushedGroupings;
+        private List<RemoteGrouping> pushedGroupings;
         private boolean aggregateIntermediateState;
 
         public Builder sourceType(String sourceType) {
@@ -512,7 +512,7 @@ public record SourceOperatorContext(
             return this;
         }
 
-        public Builder pushedGroupings(List<String> pushedGroupings) {
+        public Builder pushedGroupings(List<RemoteGrouping> pushedGroupings) {
             this.pushedGroupings = pushedGroupings;
             return this;
         }

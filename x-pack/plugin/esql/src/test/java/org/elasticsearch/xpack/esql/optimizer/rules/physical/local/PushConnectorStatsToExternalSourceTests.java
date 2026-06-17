@@ -16,10 +16,12 @@ import org.elasticsearch.xpack.esql.core.expression.FoldContext;
 import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
 import org.elasticsearch.xpack.esql.core.expression.ReferenceAttribute;
+import org.elasticsearch.xpack.esql.core.tree.Location;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
@@ -30,6 +32,7 @@ import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.Equ
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
+import org.elasticsearch.xpack.esql.plan.physical.EvalExec;
 import org.elasticsearch.xpack.esql.plan.physical.ExternalSourceExec;
 import org.elasticsearch.xpack.esql.plan.physical.PhysicalPlan;
 import org.elasticsearch.xpack.esql.planner.PlannerSettings;
@@ -179,7 +182,7 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
 
         assertThat(result, instanceOf(ExternalSourceExec.class));
         ExternalSourceExec resultExt = (ExternalSourceExec) result;
-        assertEquals(List.of("message"), resultExt.pushedGroupings());
+        assertEquals(List.of(RemoteGrouping.ofField("message")), resultExt.pushedGroupings());
         assertEquals(1, resultExt.pushedAggregates().size());
         assertEquals("COUNT", resultExt.pushedAggregates().get(0).function());
         assertTrue(resultExt.pushedAggregateIntermediate());
@@ -210,7 +213,7 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
 
         assertThat(result, instanceOf(ExternalSourceExec.class));
         ExternalSourceExec resultExt = (ExternalSourceExec) result;
-        assertEquals(List.of("message", "level"), resultExt.pushedGroupings());
+        assertEquals(List.of(RemoteGrouping.ofField("message"), RemoteGrouping.ofField("level")), resultExt.pushedGroupings());
         assertEquals(1, resultExt.pushedAggregates().size());
         assertTrue(resultExt.pushedAggregateIntermediate());
         assertEquals(intermediate, resultExt.output());
@@ -232,6 +235,41 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         );
         PhysicalPlan result = applyRule(agg, true);
         assertThat(result, instanceOf(AggregateExec.class));
+    }
+
+    public void testComputedGroupingFromEvalIsPushed() {
+        // The SigEvents histogram shape AggregateExec(EvalExec(source)): the grouping references an eval field that
+        // computes a time BUCKET. The rule looks through the Eval, renders the field from its source text, removes
+        // the Eval, and pushes the computed grouping. (A real Bucket is exercised end-to-end by the two-cluster
+        // test; here a Literal carrying the BUCKET source text stands in to keep the rule test lightweight.)
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute bucket = referenceAttribute("bucket", DataType.DATETIME);
+        Literal bucketExpr = new Literal(new Source(Location.EMPTY, "BUCKET(@timestamp, 5 minutes)"), 0L, DataType.DATETIME);
+        EvalExec eval = new EvalExec(Source.EMPTY, ext, List.of(new Alias(Source.EMPTY, "bucket", bucketExpr)));
+        List<Attribute> intermediate = List.of(
+            bucket,
+            referenceAttribute("c", DataType.LONG),
+            referenceAttribute("c$seen", DataType.BOOLEAN)
+        );
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            eval,
+            List.of(bucket),
+            List.of(countStar(), bucket),
+            AggregatorMode.INITIAL,
+            intermediate,
+            null
+        );
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        // The Eval is removed and the computed grouping is pushed into the source as a RemoteGrouping expression.
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals(List.of(RemoteGrouping.ofExpression("bucket", "BUCKET(@timestamp, 5 minutes)")), resultExt.pushedGroupings());
+        assertEquals(1, resultExt.pushedAggregates().size());
+        assertTrue(resultExt.pushedAggregateIntermediate());
+        assertEquals(intermediate, resultExt.output());
     }
 
     public void testNotPushedForNonAttributeGrouping() {

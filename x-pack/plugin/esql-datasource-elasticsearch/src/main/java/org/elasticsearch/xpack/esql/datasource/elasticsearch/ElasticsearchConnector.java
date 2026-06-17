@@ -27,6 +27,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalServerException;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
@@ -241,7 +242,7 @@ class ElasticsearchConnector implements Connector {
      * and group keys are backtick-quoted; argument-less aggregates (a null field, e.g. {@code COUNT(*)}) render
      * as {@code FN(*)}.
      */
-    private static void appendStats(StringBuilder query, List<RemoteAggregate> aggregates, List<String> groupings) {
+    private static void appendStats(StringBuilder query, List<RemoteAggregate> aggregates, List<RemoteGrouping> groupings) {
         query.append(" | STATS ");
         for (int i = 0; i < aggregates.size(); i++) {
             if (i > 0) {
@@ -258,7 +259,14 @@ class ElasticsearchConnector implements Connector {
                 if (i > 0) {
                     query.append(", ");
                 }
-                query.append(EsqlIdentifiers.quote(groupings.get(i)));
+                RemoteGrouping grouping = groupings.get(i);
+                if (grouping.isPlainField()) {
+                    // Plain field: render the quoted field reference (e.g. BY `service.name`).
+                    query.append(EsqlIdentifiers.quote(grouping.outputName()));
+                } else {
+                    // Computed grouping (e.g. a time BUCKET): render `out` = <already-rendered remote expression>.
+                    query.append(EsqlIdentifiers.quote(grouping.outputName())).append(" = ").append(grouping.expression());
+                }
             }
         }
     }
@@ -358,15 +366,16 @@ class ElasticsearchConnector implements Connector {
         for (int i = 0; i < columns.size(); i++) {
             columnIndexByName.put(columns.get(i).name(), i);
         }
-        List<String> groupings = request.pushedGroupings();
+        List<RemoteGrouping> groupings = request.pushedGroupings();
         List<RemoteAggregate> aggregates = request.pushedAggregates();
         Block[] blocks = new Block[groupings.size() + aggregates.size() * 2];
         boolean success = false;
         try {
             int out = 0;
-            // Grouping keys pass through as-is, in the order the planner expects them.
-            for (String grouping : groupings) {
-                blocks[out++] = decodeColumnByName(grouping, columnIndexByName, columns, columnValues, rowCount, blockFactory);
+            // Grouping keys pass through as-is, in the order the planner expects them. A computed grouping (e.g. a
+            // time BUCKET) is returned by the remote under its output-name alias, so look it up by output name.
+            for (RemoteGrouping grouping : groupings) {
+                blocks[out++] = decodeColumnByName(grouping.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
             }
             // Each aggregate becomes a (value, seen=true) pair.
             for (RemoteAggregate aggregate : aggregates) {

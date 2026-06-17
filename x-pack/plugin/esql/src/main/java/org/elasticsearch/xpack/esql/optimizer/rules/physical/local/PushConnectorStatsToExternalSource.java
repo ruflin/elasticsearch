@@ -16,6 +16,7 @@ import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.AggregateFunction;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
@@ -23,11 +24,16 @@ import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.PhysicalOptimizerRules;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
+import org.elasticsearch.xpack.esql.plan.physical.EvalExec;
 import org.elasticsearch.xpack.esql.plan.physical.ExternalSourceExec;
 import org.elasticsearch.xpack.esql.plan.physical.PhysicalPlan;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Pushes a {@code STATS} aggregation directly over an {@link ExternalSourceExec} into the source for connector
@@ -64,10 +70,20 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
 
     @Override
     protected PhysicalPlan rule(AggregateExec aggregateExec, LocalPhysicalOptimizerContext ctx) {
-        if (aggregateExec.child() instanceof ExternalSourceExec == false) {
+        // The aggregate sits directly over the source, or over an EvalExec that computes grouping keys (e.g. a time
+        // BUCKET). ReplaceAggregateNestedExpressionWithEval extracts evaluatable grouping functions into an Eval and
+        // replaces the grouping with a reference to the eval output, so the histogram shape arrives here as
+        // AggregateExec(EvalExec(ExternalSourceExec)). Look through that Eval and render its fields remotely.
+        EvalExec evalExec = null;
+        PhysicalPlan child = aggregateExec.child();
+        if (child instanceof EvalExec ee && ee.child() instanceof ExternalSourceExec) {
+            evalExec = ee;
+            child = ee.child();
+        }
+        if (child instanceof ExternalSourceExec == false) {
             return aggregateExec;
         }
-        ExternalSourceExec ext = (ExternalSourceExec) aggregateExec.child();
+        ExternalSourceExec ext = (ExternalSourceExec) child;
         if (aggregatePushdownSupported(ext.sourceType(), ctx) == false) {
             return aggregateExec;
         }
@@ -91,16 +107,37 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             || ext.pushedAggregates().isEmpty() == false) {
             return aggregateExec;
         }
-        // Supports ungrouped STATS and STATS ... BY one or more plain-attribute keys. Non-attribute groupings
-        // (e.g. BY bucket(...) or other grouping functions) are out of scope and left for a later step.
+        // Build the map of eval-field name -> rendered remote expression for a looked-through Eval (e.g. a time
+        // BUCKET). Only push when EVERY eval field is consumed as a grouping key below; a leftover eval field would
+        // be dropped by removing the Eval, changing the result. Each field is rendered from its source text, which
+        // is valid remote ES|QL because the remote runs the same query language over the same field names.
+        Map<String, String> evalRenderings = evalGroupingRenderings(evalExec);
+        if (evalRenderings == null) {
+            return aggregateExec;
+        }
+        // Supports ungrouped STATS and STATS ... BY one or more keys, where each key is a plain source attribute or
+        // an eval-computed expression (e.g. BUCKET). The grouping is always a reference here; computed keys reference
+        // the looked-through Eval's output.
         List<? extends Expression> groupings = aggregateExec.groupings();
-        List<String> remoteGroupings = new ArrayList<>(groupings.size());
+        List<RemoteGrouping> remoteGroupings = new ArrayList<>(groupings.size());
+        Set<String> consumedEvalFields = new HashSet<>();
         for (Expression grouping : groupings) {
             Attribute groupAttribute = Expressions.attribute(grouping);
             if (groupAttribute == null) {
                 return aggregateExec;
             }
-            remoteGroupings.add(groupAttribute.name());
+            String name = groupAttribute.name();
+            String rendered = evalRenderings.get(name);
+            if (rendered != null) {
+                remoteGroupings.add(RemoteGrouping.ofExpression(name, rendered));
+                consumedEvalFields.add(name);
+            } else {
+                remoteGroupings.add(RemoteGrouping.ofField(name));
+            }
+        }
+        // Every eval field must be a grouping key; otherwise removing the Eval would drop a needed computed column.
+        if (consumedEvalFields.size() != evalRenderings.size()) {
+            return aggregateExec;
         }
 
         boolean grouped = groupings.isEmpty() == false;
@@ -134,6 +171,36 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         // or its intermediate attributes for INITIAL (so the FINAL aggregate above consumes the right schema).
         List<Attribute> output = intermediate ? aggregateExec.intermediateAttributes() : aggregateExec.output();
         return ext.withPushedAggregate(remoteAggregates, remoteGroupings, output, intermediate);
+    }
+
+    /**
+     * Renders the fields of a looked-through grouping {@link EvalExec} into remote ES|QL fragments, keyed by output
+     * name. Returns an empty map when there is no Eval (the aggregate sits directly over the source). Returns
+     * {@code null} (bail) when any eval field cannot be safely forwarded — i.e. its source text is unavailable, or it
+     * references another eval output rather than only source columns (which the remote would not have under that
+     * name). The source text of a parsed expression (e.g. {@code BUCKET(@timestamp, 5 minutes)}) is valid remote
+     * ES|QL because the remote runs the same query language over the same field names.
+     */
+    private static Map<String, String> evalGroupingRenderings(EvalExec evalExec) {
+        if (evalExec == null) {
+            return Map.of();
+        }
+        Map<String, String> renderings = new HashMap<>();
+        for (Alias field : evalExec.fields()) {
+            String sourceText = field.child().sourceText();
+            if (sourceText == null || sourceText.isBlank()) {
+                // No original text to forward (e.g. a synthesized expression). Bail rather than guess a rendering.
+                return null;
+            }
+            // A field that references a prior eval field cannot be forwarded as-is: the remote has no such column.
+            for (Alias other : evalExec.fields()) {
+                if (other != field && field.child().anyMatch(e -> e instanceof Attribute a && a.name().equals(other.name()))) {
+                    return null;
+                }
+            }
+            renderings.put(field.name(), sourceText);
+        }
+        return renderings;
     }
 
     /** Whether {@code agg} is a bare reference to one of the grouping keys (so the connector renders it via BY). */
