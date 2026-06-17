@@ -660,6 +660,21 @@ run_verification_suite() {
     "FROM ${D} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\" BY \`service.name\` | SORT \`service.name\`" \
     "FROM ${T} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\" BY \`service.name\` | SORT \`service.name\`"
 
+  # 18. (F7) Datetime time-bound: the SigEvents/KI time range @timestamp >= TO_DATETIME(<ms>). The folded
+  # datetime is re-rendered as TO_DATETIME(<millis>) on the remote leg, so a bounded count must match
+  # direct-remote. A 6-hours-ago bound selects a subset of the 12-hour data spread (so it is a real filter).
+  local six_hours_ago_ms
+  six_hours_ago_ms="$(( ( $(date +%s) - 21600 ) * 1000 ))"
+  assert_match "datetime time-bound COUNT (@timestamp >= TO_DATETIME(ms))" \
+    "FROM ${D} | WHERE @timestamp >= TO_DATETIME(${six_hours_ago_ms}) | STATS c = COUNT(*)" \
+    "FROM ${T} | WHERE @timestamp >= TO_DATETIME(${six_hours_ago_ms}) | STATS c = COUNT(*)"
+
+  # 19. (F7) IN list: the KI dedup/lookup shape <field> IN (...). The list of values is rendered into a
+  # remote IN clause, so a count over an IN filter must match direct-remote.
+  assert_match "IN-list filtered COUNT (log.level IN (ERROR, WARN))" \
+    "FROM ${D} | WHERE \`log.level\` IN (\\\"ERROR\\\", \\\"WARN\\\") | STATS c = COUNT(*)" \
+    "FROM ${T} | WHERE \`log.level\` IN (\\\"ERROR\\\", \\\"WARN\\\") | STATS c = COUNT(*)"
+
   log "-- Known pushdown gaps (probes; non-fatal) -------------------"
   # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
   # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.

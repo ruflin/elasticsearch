@@ -22,6 +22,7 @@ import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.Equ
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.EsqlBinaryComparison;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThanOrEqual;
+import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.In;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.LessThan;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.LessThanOrEqual;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.NotEquals;
@@ -40,7 +41,9 @@ import java.util.Optional;
  * stay correct even when nothing is pushed.
  * <p>
  * Supported: comparisons ({@code == != < <= > >=}) between a field and a foldable string / number /
- * boolean literal (either operand order), combined with {@code AND}, {@code OR} and {@code NOT}.
+ * boolean / datetime value (either operand order), {@code <field> IN (<foldable values>)}, combined with
+ * {@code AND}, {@code OR} and {@code NOT}. The value side may be any foldable expression (a literal or a
+ * foldable function such as {@code TO_DATETIME("...")}), not only a {@link Literal}.
  */
 final class EsqlFilterTranslator implements FilterPushdownSupport {
 
@@ -104,7 +107,31 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         if (expr instanceof EsqlBinaryComparison cmp) {
             return renderComparison(cmp);
         }
+        if (expr instanceof In in) {
+            return renderIn(in);
+        }
         return Optional.empty();
+    }
+
+    /**
+     * Renders {@code <field> IN (<v1>, <v2>, ...)} when the left side is a field and every list element is a
+     * renderable foldable value (string / number / boolean / datetime). Returns empty (not pushed) otherwise, so
+     * the predicate stays in the local FilterExec.
+     */
+    private static Optional<String> renderIn(In in) {
+        Attribute field = Expressions.attribute(in.value());
+        if (field == null || in.list().isEmpty()) {
+            return Optional.empty();
+        }
+        List<String> values = new ArrayList<>(in.list().size());
+        for (Expression element : in.list()) {
+            Optional<String> rendered = renderValue(element);
+            if (rendered.isEmpty()) {
+                return Optional.empty();
+            }
+            values.add(rendered.get());
+        }
+        return Optional.of(EsqlIdentifiers.quote(field.name()) + " IN (" + String.join(", ", values) + ")");
     }
 
     private static Optional<String> renderBinaryLogical(Expression left, Expression right, String op) {
@@ -121,25 +148,26 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         if (symbol == null) {
             return Optional.empty();
         }
-        // Accept field <op> literal or literal <op> field, normalising to field <op> literal.
+        // Accept field <op> value or value <op> field, normalising to field <op> value. The value side is any
+        // foldable expression (a literal or a foldable function such as TO_DATETIME("...")), not only a Literal.
         Attribute field;
-        Literal literal;
+        Expression valueExpr;
         boolean flipped;
         Attribute left = Expressions.attribute(cmp.left());
         Attribute right = Expressions.attribute(cmp.right());
-        if (left != null && cmp.right() instanceof Literal lit) {
+        if (left != null && right == null && cmp.right().foldable()) {
             field = left;
-            literal = lit;
+            valueExpr = cmp.right();
             flipped = false;
-        } else if (cmp.left() instanceof Literal lit && right != null) {
+        } else if (right != null && left == null && cmp.left().foldable()) {
             field = right;
-            literal = lit;
+            valueExpr = cmp.left();
             flipped = true;
         } else {
             return Optional.empty();
         }
 
-        Optional<String> value = renderLiteral(literal);
+        Optional<String> value = renderValue(valueExpr);
         if (value.isEmpty()) {
             return Optional.empty();
         }
@@ -181,9 +209,18 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
         };
     }
 
-    private static Optional<String> renderLiteral(Literal literal) {
-        DataType type = literal.dataType();
-        Object value = literal.fold(FoldContext.small());
+    /**
+     * Renders a foldable value-side expression (a literal or a foldable function such as {@code TO_DATETIME(...)})
+     * into a remote ES|QL value, or empty when its type is outside the supported set. DATETIME folds to epoch
+     * millis and is re-rendered as {@code TO_DATETIME(<millis>)} so the remote compares a datetime to a datetime
+     * (a bare long would be a type error remotely).
+     */
+    private static Optional<String> renderValue(Expression expr) {
+        if (expr.foldable() == false) {
+            return Optional.empty();
+        }
+        DataType type = expr.dataType();
+        Object value = expr.fold(FoldContext.small());
         if (value == null) {
             return Optional.empty();
         }
@@ -191,6 +228,8 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
             case KEYWORD, TEXT -> quoteString(bytesRefToString(value));
             case BOOLEAN -> Optional.of(Boolean.TRUE.equals(value) ? "true" : "false");
             case INTEGER, LONG, DOUBLE -> Optional.of(value.toString());
+            // DATETIME folds to epoch millis (Long); wrap so the remote rebuilds a datetime value.
+            case DATETIME -> value instanceof Long millis ? Optional.of("TO_DATETIME(" + millis + ")") : Optional.empty();
             default -> Optional.empty();
         };
     }

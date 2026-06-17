@@ -165,15 +165,13 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * SigEvents/KI builds time-range predicates as {@code @timestamp >= TO_DATETIME("...")} (Kibana
-     * {@code latest_source_query.ts#applyTimeRange}). The right operand is a function call, not a {@link Literal},
-     * so the comparison is not pushed and stays in the local FilterExec — the remote returns its full (implicitly
-     * capped) page and the range is applied locally over only that page. This is a correctness/cost gap for any
-     * time-bounded read against the connector.
+     * A foldable time bound ({@code @timestamp >= TO_DATETIME("...")}) is pushed (see {@code testDatetimeBoundIsPushed}),
+     * but a bound against a <em>non-foldable</em> value side (another field / a runtime expression) still cannot be
+     * rendered as a constant and stays in the local FilterExec. The remote returns its full (implicitly capped) page
+     * and the predicate is applied locally — a correctness/cost gap only for non-constant value sides.
      */
-    public void testTimeRangeAgainstFunctionValueIsNotPushed() {
-        // Stand-in for `@timestamp >= TO_DATETIME(<param>)`: the value side is a non-foldable reference, mirroring
-        // a function/parameter the translator cannot render as a literal.
+    public void testTimeRangeAgainstNonFoldableValueIsNotPushed() {
+        // The value side is a non-foldable field reference, which the translator cannot render as a constant.
         Expression rhs = field("computed_ts", DataType.DATETIME);
         Expression expr = new GreaterThan(Source.EMPTY, field("@timestamp", DataType.DATETIME), rhs, null);
         assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(expr)));
@@ -181,27 +179,57 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
     }
 
     /**
-     * A datetime literal comparison ({@code @timestamp <= <datetime literal>}) is also not pushed: the literal
-     * renderer only handles keyword/text/boolean/int/long/double, so DATETIME literals fall through to "not
-     * pushable". KI/SigEvents time bounds therefore never reach the remote regardless of how they are expressed.
+     * A datetime bound is pushed by re-rendering the folded epoch-millis value as {@code TO_DATETIME(<millis>)} so
+     * the remote compares a datetime to a datetime. {@code TO_DATETIME("...")} folds to a DATETIME literal before
+     * pushdown, so a DATETIME literal here faithfully represents the SigEvents/KI time bound after constant folding.
      */
-    public void testDatetimeLiteralComparisonIsNotPushed() {
+    public void testDatetimeBoundIsPushed() {
         Literal datetimeLit = new Literal(Source.EMPTY, 1_700_000_000_000L, DataType.DATETIME);
         Expression expr = new LessThanOrEqual(Source.EMPTY, field("@timestamp", DataType.DATETIME), datetimeLit, null);
-        assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(expr)));
-        assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(expr));
+        assertEquals(Optional.of("`@timestamp` <= TO_DATETIME(1700000000000)"), EsqlFilterTranslator.toWhereClause(List.of(expr)));
+        assertEquals(FilterPushdownSupport.Pushability.YES, EsqlFilterTranslator.INSTANCE.canPush(expr));
+    }
+
+    /**
+     * A datetime bound with the value on the left ({@code <datetime literal> >= @timestamp}) is normalised to
+     * {@code @timestamp <= TO_DATETIME(...)}, exercising both the foldable-value-side and operator-flip paths.
+     */
+    public void testDatetimeBoundFlippedIsPushed() {
+        Literal datetimeLit = new Literal(Source.EMPTY, 1_700_000_000_000L, DataType.DATETIME);
+        Expression expr = new GreaterThan(Source.EMPTY, datetimeLit, field("@timestamp", DataType.DATETIME), null);
+        assertEquals(Optional.of("`@timestamp` < TO_DATETIME(1700000000000)"), EsqlFilterTranslator.toWhereClause(List.of(expr)));
     }
 
     /**
      * The KI dedup / lookup path filters with {@code <field> IN (...)} (Kibana {@code latest_source_query.ts#inFilter},
-     * e.g. {@code _id IN (...)}). The translator only handles {@code == != < <= > >=} comparisons plus AND/OR/NOT,
-     * so an {@code IN} list is not pushed and is applied locally over the connector's capped page.
+     * e.g. {@code _id IN (...)}). The list of foldable values is rendered into a remote {@code IN} clause.
      */
-    public void testInListIsNotPushed() {
+    public void testInListIsPushed() {
         Expression in = new org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.In(
             Source.EMPTY,
             field("status", DataType.KEYWORD),
             List.of(kw("active"), kw("error"))
+        );
+        assertEquals(Optional.of("`status` IN (\"active\", \"error\")"), EsqlFilterTranslator.toWhereClause(List.of(in)));
+        assertEquals(FilterPushdownSupport.Pushability.YES, EsqlFilterTranslator.INSTANCE.canPush(in));
+    }
+
+    /** A numeric IN list is rendered with bare numbers. */
+    public void testNumericInListIsPushed() {
+        Expression in = new org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.In(
+            Source.EMPTY,
+            field("status_code", DataType.INTEGER),
+            List.of(intLit(404), intLit(500))
+        );
+        assertEquals(Optional.of("`status_code` IN (404, 500)"), EsqlFilterTranslator.toWhereClause(List.of(in)));
+    }
+
+    /** An IN list with a non-foldable / unrenderable element is not pushed; it stays in the local FilterExec. */
+    public void testInListWithFieldElementIsNotPushed() {
+        Expression in = new org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.In(
+            Source.EMPTY,
+            field("status", DataType.KEYWORD),
+            List.of(kw("active"), field("other", DataType.KEYWORD))
         );
         assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(in)));
         assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(in));
