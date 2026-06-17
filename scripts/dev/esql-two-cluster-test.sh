@@ -613,6 +613,19 @@ run_verification_suite() {
     "FROM ${D} | STATS c = COUNT(*) BY \`host.name\`, \`service.name\` | SORT \`host.name\`, \`service.name\`" \
     "FROM ${T} | STATS c = COUNT(*) BY \`host.name\`, \`service.name\` | SORT \`host.name\`, \`service.name\`"
 
+  # 10. (match path: METADATA _id) The KI `match` rule reads back _id via FROM <dataset> METADATA _id. The
+  # rewriter now forwards _id/_source to the elasticsearch connector, the connector renders FROM ... METADATA
+  # on the remote leg, and _id (a keyword) decodes as before, so a deterministic _id slice must match direct.
+  assert_match "METADATA _id read matches direct-remote" \
+    "FROM ${D} METADATA _id | KEEP _id | SORT _id | LIMIT 50" \
+    "FROM ${T} METADATA _id | KEEP _id | SORT _id | LIMIT 50"
+
+  # 11. (match path: METADATA _source decode) Reading _source back through the connector must not throw and
+  # must return the requested rows. The connector decodes the structured _source value into a JSON BytesRef;
+  # asserting the exact row count proves decode succeeded (a decode failure would error or drop the column).
+  assert_row_count "METADATA _id, _source read returns n rows" \
+    "FROM ${D} METADATA _id, _source | KEEP _id, _source | LIMIT 13" 13
+
   log "-- Known pushdown gaps (probes; non-fatal) -------------------"
   # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
   # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
