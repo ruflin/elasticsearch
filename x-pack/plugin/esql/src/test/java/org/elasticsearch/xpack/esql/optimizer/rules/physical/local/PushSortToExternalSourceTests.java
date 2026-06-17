@@ -95,7 +95,7 @@ public class PushSortToExternalSourceTests extends ESTestCase {
 
     public void testSortPushedAfterAggregatePushdown() {
         ExternalSourceExec ext = connectorSource().withPushedAggregate(
-            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             List.of(referenceAttribute("c", DataType.LONG)),
             false

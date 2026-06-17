@@ -152,7 +152,7 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
     public void testNotPushedWhenAggregatesAlreadyPushed() {
         // A source that already carries a pushed aggregate must not be annotated a second time.
         ExternalSourceExec ext = connectorSource().withPushedAggregate(
-            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             List.of(referenceAttribute("c", DataType.LONG)),
             false

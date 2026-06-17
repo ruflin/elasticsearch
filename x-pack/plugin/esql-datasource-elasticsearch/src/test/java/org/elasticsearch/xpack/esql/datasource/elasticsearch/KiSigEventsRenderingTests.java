@@ -91,7 +91,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     public void testUngroupedCountStatsRenders() {
         // FROM logs | STATS total = COUNT(*) — the simplest SigEvents/KI count, computed remotely.
         String query = ElasticsearchConnector.buildRemoteQuery(
-            request(List.of(), -1, List.of(), List.of(new RemoteAggregate("total", "COUNT", null)), List.of())
+            request(List.of(), -1, List.of(), List.of(RemoteAggregate.of("total", "COUNT", null)), List.of())
         );
         assertThat(query, equalTo("FROM logs | STATS `total` = COUNT(*)"));
     }
@@ -103,7 +103,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
                 List.of(),
                 -1,
                 List.of(),
-                List.of(new RemoteAggregate("c", "COUNT", null)),
+                List.of(RemoteAggregate.of("c", "COUNT", null)),
                 List.of(RemoteGrouping.ofField("service.name"))
             )
         );
@@ -118,7 +118,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
                 List.of(),
                 -1,
                 List.of(),
-                List.of(new RemoteAggregate("c", "COUNT", null)),
+                List.of(RemoteAggregate.of("c", "COUNT", null)),
                 List.of(RemoteGrouping.ofExpression("bucket", "BUCKET(@timestamp, 5 minutes)"))
             )
         );
@@ -129,7 +129,13 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         // FROM logs | STATS errors = COUNT(*) WHERE log.level == "error" — a per-aggregate filter is rendered as a
         // WHERE clause attached to the aggregate. This is the SigEvents conditional-count shape (e.g. error rate).
         String query = ElasticsearchConnector.buildRemoteQuery(
-            request(List.of(), -1, List.of(), List.of(new RemoteAggregate("errors", "COUNT", null, "log.level == \"error\"")), List.of())
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(new RemoteAggregate("errors", "COUNT", null, "log.level == \"error\"", null)),
+                List.of()
+            )
         );
         assertThat(query, equalTo("FROM logs | STATS `errors` = COUNT(*) WHERE log.level == \"error\""));
     }
@@ -141,7 +147,10 @@ public class KiSigEventsRenderingTests extends ESTestCase {
                 List.of(),
                 -1,
                 List.of(),
-                List.of(new RemoteAggregate("errors", "COUNT", null, "status_code >= 500"), new RemoteAggregate("total", "COUNT", null)),
+                List.of(
+                    new RemoteAggregate("errors", "COUNT", null, "status_code >= 500", null),
+                    RemoteAggregate.of("total", "COUNT", null)
+                ),
                 List.of()
             )
         );
@@ -157,7 +166,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
                 List.of(),
                 -1,
                 List.of(),
-                List.of(new RemoteAggregate("s", "SUM", "event.duration")),
+                List.of(RemoteAggregate.of("s", "SUM", "event.duration")),
                 List.of(RemoteGrouping.ofField("service.name"))
             )
         );

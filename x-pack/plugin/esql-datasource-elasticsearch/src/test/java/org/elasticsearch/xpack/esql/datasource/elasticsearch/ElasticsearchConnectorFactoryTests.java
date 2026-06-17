@@ -264,7 +264,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             5,
             List.of(),
             List.of(),
-            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             false,
             null
@@ -292,7 +292,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             FormatReader.NO_LIMIT,
             List.of(filter),
             List.of(),
-            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             false,
             null
@@ -310,7 +310,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             FormatReader.NO_LIMIT,
             List.of(),
             List.of(),
-            List.of(new RemoteAggregate("c", "COUNT", null), new RemoteAggregate("mx", "MAX", "bytes")),
+            List.of(RemoteAggregate.of("c", "COUNT", null), RemoteAggregate.of("mx", "MAX", "bytes")),
             List.of(RemoteGrouping.ofField("data_stream.type")),
             false,
             null
@@ -331,7 +331,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             5,
             List.of(),
             List.of(new RemoteSort("c", false, false)),
-            List.of(new RemoteAggregate("c", "COUNT", null)),
+            List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(RemoteGrouping.ofField("service.name")),
             false,
             null
