@@ -7,10 +7,12 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
+import org.elasticsearch.compute.data.BytesRefBlock;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
@@ -112,23 +114,35 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // GAP 1: METADATA _id, _source is never rendered. The KI `match` rule path reads back _id and _source, but
-    // the connector only ever issues `FROM <target> ...` with no METADATA option, so the remote response carries
-    // neither column. This characterises that the rendered query is metadata-free regardless of projection.
+    // F5 (was GAP 1): METADATA _id, _source IS now rendered. The KI `match` rule path reads back _id and _source,
+    // so when those columns are projected the connector emits the FROM ... METADATA option, then projects them
+    // with KEEP. Without the option the remote response would carry neither column.
     // ---------------------------------------------------------------------------------------------------------
 
-    public void testConnectorNeverRendersMetadataIdOrSource() {
-        // Even if _id / _source are asked for as projected columns, no METADATA option is emitted: the connector
-        // renders `KEEP _id, _source` over a `FROM logs` that (without METADATA) never produced those columns.
+    public void testConnectorRendersMetadataIdAndSource() {
+        // _id / _source projected => FROM logs METADATA _id, _source ... | KEEP _id, _source. Metadata names are
+        // emitted unquoted in the METADATA option (the option does not accept backtick-quoted identifiers).
         String query = ElasticsearchConnector.buildRemoteQuery(request(List.of("_id", "_source"), 1000, List.of(), List.of(), List.of()));
-        assertThat("connector does not emit a METADATA option", query, not(containsString("METADATA")));
-        assertThat(query, equalTo("FROM logs | KEEP `_id`, `_source` | LIMIT 1000"));
+        assertThat(query, equalTo("FROM logs METADATA _id, _source | KEEP `_id`, `_source` | LIMIT 1000"));
+    }
+
+    public void testMetadataOnlyEmittedForMetadataColumns() {
+        // Ordinary fields and @timestamp (not a metadata attribute) never trigger a METADATA option; only genuine
+        // metadata attributes do. _index is a metadata attribute, so it is added alongside the ordinary fields.
+        String plain = ElasticsearchConnector.buildRemoteQuery(
+            request(List.of("@timestamp", "message"), -1, List.of(), List.of(), List.of())
+        );
+        assertThat("no metadata option for ordinary fields", plain, not(containsString("METADATA")));
+
+        String withIndex = ElasticsearchConnector.buildRemoteQuery(
+            request(List.of("@timestamp", "_index"), -1, List.of(), List.of(), List.of())
+        );
+        assertThat(withIndex, equalTo("FROM logs METADATA _index | KEEP `@timestamp`, `_index`"));
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // GAP 2: _source / object columns cannot be decoded into a value block. A match-rule response column typed
-    // `_source` (or `object`) hits the value-decoder's default branch and throws, rather than surfacing as a
-    // (null or structured) block. So even if METADATA were rendered, reading _source back would fail at decode.
+    // F6 (was GAP 2): _source / object columns now decode into a BytesRef block holding the captured JSON text,
+    // mirroring how local ES|QL carries a _source value as bytes. This makes the KI `match` read of _source work.
     // ---------------------------------------------------------------------------------------------------------
 
     public void testSourceTypeResolvesToSourceDataType() {
@@ -137,17 +151,20 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         assertThat(DataType.fromNameOrAlias("_source"), equalTo(DataType.SOURCE));
     }
 
-    public void testSourceColumnDecodeIsUnsupported() {
-        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> {
-            try (Block ignored = EsqlTypeMapping.toBlock(DataType.SOURCE, List.of("{}"), 1, blockFactory)) {}
-        });
-        assertThat(e.getMessage(), containsString("Unsupported remote Elasticsearch column type for value decoding"));
+    public void testSourceColumnDecodesToJsonBytes() {
+        String json = "{\"message\":\"hi\",\"level\":\"INFO\"}";
+        try (Block block = EsqlTypeMapping.toBlock(DataType.SOURCE, List.of(json), 1, blockFactory)) {
+            assertThat(block.getPositionCount(), equalTo(1));
+            BytesRefBlock bytesRefBlock = (BytesRefBlock) block;
+            assertThat(bytesRefBlock.getBytesRef(0, new BytesRef()).utf8ToString(), equalTo(json));
+        }
     }
 
-    public void testObjectColumnDecodeIsUnsupported() {
-        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> {
-            try (Block ignored = EsqlTypeMapping.toBlock(DataType.OBJECT, List.of("{}"), 1, blockFactory)) {}
-        });
-        assertThat(e.getMessage(), containsString("Unsupported remote Elasticsearch column type for value decoding"));
+    public void testObjectColumnDecodesToJsonBytes() {
+        String json = "{\"a\":1}";
+        try (Block block = EsqlTypeMapping.toBlock(DataType.OBJECT, List.of(json), 1, blockFactory)) {
+            BytesRefBlock bytesRefBlock = (BytesRefBlock) block;
+            assertThat(bytesRefBlock.getBytesRef(0, new BytesRef()).utf8ToString(), equalTo(json));
+        }
     }
 }

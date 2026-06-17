@@ -162,6 +162,7 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
         return config;
     }
 
+    /** Metadata fields requested via {@code METADATA} on the {@code FROM <dataset>}; empty when none were requested. */
     public List<NamedExpression> metadataFields() {
         return metadataFields;
     }
@@ -184,7 +185,6 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
     public DatasetMapping mapping() {
         return mapping;
     }
-
     @Override
     public boolean resolved() {
         return false;

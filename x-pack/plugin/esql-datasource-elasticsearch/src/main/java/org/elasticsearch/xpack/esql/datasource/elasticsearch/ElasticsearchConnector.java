@@ -7,9 +7,11 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
+import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.Page;
@@ -17,6 +19,7 @@ import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
+import org.elasticsearch.xpack.esql.core.expression.MetadataAttribute;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalClientException;
@@ -144,6 +147,10 @@ class ElasticsearchConnector implements Connector {
      */
     static String buildRemoteQuery(QueryRequest request) {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
+        // Request metadata columns (e.g. _id, _source) via the FROM ... METADATA option. Without this option the
+        // remote response carries no metadata columns, so a KEEP/projection referencing _id or _source would read
+        // nothing. The Kibana KI `match` rule path reads back _id and _source, so this unblocks that use case.
+        appendMetadata(query, request);
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
         // A pushed aggregate replaces row materialization entirely: render STATS and return aggregate output rows.
@@ -163,6 +170,37 @@ class ElasticsearchConnector implements Connector {
         // Push the row limit so the remote cluster stops early instead of returning every matching row.
         appendLimit(query, request.rowLimit());
         return query.toString();
+    }
+
+    /**
+     * Appends a {@code METADATA <name>, ...} option to the {@code FROM} clause for every projected column that is a
+     * supported ES|QL metadata attribute (e.g. {@code _id}, {@code _source}, {@code _index}). The names are taken
+     * from the requested columns and recognized via {@link MetadataAttribute#isSupported(String)}, so only genuine
+     * metadata fields trigger the option; ordinary fields and {@code @timestamp} (which is not a metadata attribute)
+     * are left to the normal {@code FROM}/projection path. Metadata names are emitted unquoted because the ES|QL
+     * {@code METADATA} option does not accept backtick-quoted identifiers and metadata names are fixed, safe tokens.
+     */
+    private static void appendMetadata(StringBuilder query, QueryRequest request) {
+        List<String> projected = request.projectedColumns();
+        if (projected == null || projected.isEmpty()) {
+            return;
+        }
+        List<String> metadataColumns = new ArrayList<>();
+        for (String column : projected) {
+            if (MetadataAttribute.isSupported(column)) {
+                metadataColumns.add(column);
+            }
+        }
+        if (metadataColumns.isEmpty()) {
+            return;
+        }
+        query.append(" METADATA ");
+        for (int i = 0; i < metadataColumns.size(); i++) {
+            if (i > 0) {
+                query.append(", ");
+            }
+            query.append(metadataColumns.get(i));
+        }
     }
 
     private static void appendSort(StringBuilder query, List<RemoteSort> sort) {
@@ -244,7 +282,7 @@ class ElasticsearchConnector implements Connector {
                     while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
                         List<Object> colValues = new ArrayList<>();
                         while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-                            colValues.add(readScalar(parser));
+                            colValues.add(readValue(parser));
                         }
                         columnValues.add(colValues);
                     }
@@ -369,21 +407,37 @@ class ElasticsearchConnector implements Connector {
     }
 
     /**
-     * Reads a single scalar JSON value at the parser's current token. Nested objects/arrays are
-     * skipped and reported as {@code null} — ES|QL columnar values are always scalars, so this
-     * only happens on a malformed or future-version response.
+     * Reads a single value at the parser's current token. Scalars are returned as their decoded Java value;
+     * a nested object or array (e.g. a {@code _source} column value) is captured as its compact JSON text so a
+     * {@code SOURCE}/{@code OBJECT} column can be decoded into a {@link BytesRef} block (see
+     * {@link EsqlTypeMapping#toBlock}). Most ES|QL columnar values are scalars, so the object/array branch is
+     * only hit for structural columns such as {@code _source}.
      */
-    private static Object readScalar(XContentParser parser) throws IOException {
+    private static Object readValue(XContentParser parser) throws IOException {
         return switch (parser.currentToken()) {
             case VALUE_NULL -> null;
             case VALUE_STRING -> parser.text();
             case VALUE_NUMBER -> parser.numberValue();
             case VALUE_BOOLEAN -> parser.booleanValue();
+            case START_OBJECT, START_ARRAY -> copyStructuredValueAsJson(parser);
             default -> {
                 parser.skipChildren();
                 yield null;
             }
         };
+    }
+
+    /**
+     * Copies the object/array sub-tree at the parser's current token into a compact JSON string. Used to capture a
+     * structural column value (e.g. {@code _source}) that the remote {@code _query} response renders as a nested
+     * JSON object rather than a scalar, so it can be surfaced as a {@code SOURCE}/{@code OBJECT} {@link BytesRef}
+     * column instead of being dropped.
+     */
+    private static String copyStructuredValueAsJson(XContentParser parser) throws IOException {
+        try (var builder = JsonXContent.contentBuilder()) {
+            builder.copyCurrentStructure(parser);
+            return Strings.toString(builder);
+        }
     }
 
     private static void releaseAll(Block[] blocks) {

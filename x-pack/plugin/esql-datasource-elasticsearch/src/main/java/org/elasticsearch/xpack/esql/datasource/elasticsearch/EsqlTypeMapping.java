@@ -94,6 +94,10 @@ final class EsqlTypeMapping {
     static Block toBlock(DataType dataType, List<Object> values, int rowCount, BlockFactory blockFactory) {
         return switch (dataType) {
             case KEYWORD, TEXT, IP, VERSION -> buildBytesRef(values, rowCount, blockFactory);
+            // _source and object columns arrive as captured JSON text (see ElasticsearchConnector#readValue) and are
+            // surfaced as a BytesRef block holding that JSON, mirroring how local ES|QL carries a _source value as
+            // bytes. This unblocks the KI `match` path, which reads back _source via FROM ... METADATA _id, _source.
+            case SOURCE, OBJECT -> buildBytesRef(values, rowCount, blockFactory);
             case LONG -> buildLong(values, rowCount, blockFactory, TemporalKind.NONE);
             case DATETIME -> buildLong(values, rowCount, blockFactory, TemporalKind.MILLIS);
             case DATE_NANOS -> buildLong(values, rowCount, blockFactory, TemporalKind.NANOS);
