@@ -675,14 +675,26 @@ run_verification_suite() {
     "FROM ${D} | WHERE \`log.level\` IN (\\\"ERROR\\\", \\\"WARN\\\") | STATS c = COUNT(*)" \
     "FROM ${T} | WHERE \`log.level\` IN (\\\"ERROR\\\", \\\"WARN\\\") | STATS c = COUNT(*)"
 
+  # 20. (F4) Grouped metric aggregates MAX/MIN by keyword. The connector now derives each aggregate's seen marker
+  # from value nullness, so grouped MIN/MAX is pushed and must match direct-remote.
+  assert_match "grouped MAX/MIN metric BY keyword" \
+    "FROM ${D} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 21. (F4) Ungrouped MAX/MIN over the whole stream still matches direct-remote.
+  assert_match "ungrouped MAX/MIN metric" \
+    "FROM ${D} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`)" \
+    "FROM ${T} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`)"
+
   log "-- Known pushdown gaps (probes; non-fatal) -------------------"
   # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
   # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
 
-  # Grouped metric aggregates (MIN/MAX/SUM/AVG) by keyword — only COUNT is pushed for grouped STATS today.
-  probe_gap "grouped MAX/MIN metric BY keyword" \
-    "FROM ${D} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
-    "FROM ${T} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
+  # SUM/AVG have a multi-channel intermediate aggregator layout the connector does not yet emit, so a grouped
+  # SUM/AVG falls back to local STATS over the connector's capped page — still an open pushdown gap.
+  probe_gap "grouped SUM/AVG metric BY keyword" \
+    "FROM ${D} | STATS s = SUM(\`event.duration\`), a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS s = SUM(\`event.duration\`), a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
 
   echo
   log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (correctness assertions)."
