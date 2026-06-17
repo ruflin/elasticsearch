@@ -21,6 +21,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregateState;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.expression.Order;
@@ -48,6 +49,8 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
 
     private static final String CONNECTOR_TYPE = "elasticsearch";
     private static final ReferenceAttribute MESSAGE = referenceAttribute("message", DataType.KEYWORD);
+    private static final ReferenceAttribute METRIC_DOUBLE = referenceAttribute("metric_d", DataType.DOUBLE);
+    private static final ReferenceAttribute METRIC_LONG = referenceAttribute("metric_l", DataType.LONG);
 
     public void testCountStarSingleModeReplacesAggregateWithFinalSource() {
         ExternalSourceExec ext = connectorSource();
@@ -275,20 +278,11 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertEquals("MIN", ((ExternalSourceExec) result).pushedAggregates().get(0).function());
     }
 
-    public void testGroupedSumStillNotPushed() {
-        // STATS s = SUM(message) BY level: SUM has a multi-channel intermediate layout the connector does not yet
-        // emit, so the whole STATS stays local even though MIN/MAX are now pushable.
+    public void testSumOverNonAttributeNotPushed() {
+        // STATS s = SUM(<literal>) — the SUM input is not a plain source attribute the remote can reference by name,
+        // so the aggregate (and the whole STATS) stays local.
         ExternalSourceExec ext = connectorSource();
-        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
-        AggregateExec agg = new AggregateExec(
-            Source.EMPTY,
-            ext,
-            List.of(level),
-            List.of(alias("s", new Sum(Source.EMPTY, MESSAGE)), level),
-            AggregatorMode.INITIAL,
-            List.of(level, referenceAttribute("s", DataType.DOUBLE), referenceAttribute("s$seen", DataType.BOOLEAN)),
-            null
-        );
+        AggregateExec agg = singleAggregate(ext, alias("s", new Sum(Source.EMPTY, Literal.fromDouble(Source.EMPTY, 1.0))));
         PhysicalPlan result = applyRule(agg, true);
         assertThat(result, instanceOf(AggregateExec.class));
     }
@@ -409,15 +403,59 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertThat(result, instanceOf(AggregateExec.class));
     }
 
-    public void testNotPushedForUnsupportedFunctionYet() {
-        // SUM has a multi-channel intermediate state and is outside this step's scope; the local aggregate remains.
-        AggregateExec agg = singleAggregate(connectorSource(), alias("s", new Sum(Source.EMPTY, MESSAGE)));
+    public void testUngroupedSumDoublePushedWithRecipe() {
+        // STATS s = SUM(metric_d): SUM is now pushed. SUM-double's intermediate layout is [value, delta, seen], so the
+        // recipe must carry a VALUE, a NEUTRAL (Kahan delta) and a SEEN channel for the connector to emit.
+        ExternalSourceExec ext = connectorSource();
+        AggregateExec agg = singleAggregate(ext, alias("s", new Sum(Source.EMPTY, METRIC_DOUBLE)));
+
         PhysicalPlan result = applyRule(agg, true);
-        assertThat(result, instanceOf(AggregateExec.class));
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        RemoteAggregate remote = ((ExternalSourceExec) result).pushedAggregates().get(0);
+        assertEquals("SUM", remote.function());
+        assertEquals("metric_d", remote.field());
+        assertNotNull(remote.intermediateState());
+        List<RemoteAggregateState.Channel> channels = remote.intermediateState().channels();
+        assertEquals(List.of("value", "delta", "seen"), channels.stream().map(RemoteAggregateState.Channel::name).toList());
+        assertEquals(RemoteAggregateState.Role.VALUE, channels.get(0).role());
+        assertEquals(RemoteAggregateState.Role.NEUTRAL, channels.get(1).role());
+        assertEquals(RemoteAggregateState.Role.SEEN, channels.get(2).role());
+    }
+
+    public void testGroupedSumLongPushedWithRecipe() {
+        // STATS s = SUM(metric_l) BY level: SUM-long (overflow-throw default) is [sum, seen]; channel 0 is VALUE.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        List<Attribute> intermediate = List.of(
+            level,
+            referenceAttribute("s", DataType.LONG),
+            referenceAttribute("s$seen", DataType.BOOLEAN)
+        );
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(level),
+            List.of(alias("s", new Sum(Source.EMPTY, METRIC_LONG)), level),
+            AggregatorMode.INITIAL,
+            intermediate,
+            null
+        );
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        RemoteAggregate remote = ((ExternalSourceExec) result).pushedAggregates().get(0);
+        assertEquals("SUM", remote.function());
+        assertNotNull(remote.intermediateState());
+        List<RemoteAggregateState.Channel> channels = remote.intermediateState().channels();
+        assertEquals(RemoteAggregateState.Role.VALUE, channels.get(0).role());
+        // The last channel is the seen marker regardless of how many auxiliary channels precede it.
+        assertEquals(RemoteAggregateState.Role.SEEN, channels.get(channels.size() - 1).role());
     }
 
     private static ExternalSourceExec connectorSource() {
-        List<Attribute> attrs = List.of(MESSAGE);
+        List<Attribute> attrs = List.of(MESSAGE, METRIC_DOUBLE, METRIC_LONG);
         return new ExternalSourceExec(Source.EMPTY, "es+https://host/logs*", CONNECTOR_TYPE, attrs, Map.of(), Map.of(), null);
     }
 

@@ -148,6 +148,22 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         assertThat(query, equalTo("FROM logs | STATS `errors` = COUNT(*) WHERE status_code >= 500, `total` = COUNT(*)"));
     }
 
+    public void testGroupedSumRenders() {
+        // FROM logs | STATS s = SUM(event.duration) BY service.name — grouped SUM is now pushed; the remote STATS
+        // renders the same as any other field aggregate (the intermediate-state recipe only affects decode, not the
+        // rendered remote query).
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(new RemoteAggregate("s", "SUM", "event.duration")),
+                List.of(RemoteGrouping.ofField("service.name"))
+            )
+        );
+        assertThat(query, equalTo("FROM logs | STATS `s` = SUM(`event.duration`) BY `service.name`"));
+    }
+
     public void testMatchStyleProjectedReadRenders() {
         // The non-aggregated leg of a match-style read: project a couple of fields with a SORT + LIMIT. Note this
         // is only what the connector CAN render; the KI match shape additionally needs METADATA _id, _source and

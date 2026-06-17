@@ -24,8 +24,12 @@ package org.elasticsearch.xpack.esql.datasources.spi;
  * @param filter the already-rendered remote ES|QL boolean fragment of a per-aggregate filter (the
  *        {@code level == "error"} in {@code STATS c = COUNT(*) WHERE level == "error"}), or {@code null} for an
  *        unfiltered aggregate. The connector renders {@code out = FUNC(field) WHERE <filter>}.
+ * @param intermediateState the intermediate aggregator-state layout the connector must emit when producing partial
+ *        state (see {@link RemoteAggregateState}), or {@code null} to fall back to the legacy two-channel
+ *        {@code [value, seen]} layout shared by COUNT / MIN / MAX. SUM (whose layout is type-dependent and may carry
+ *        a Kahan {@code delta} or overflow {@code failed} channel) requires an explicit recipe.
  */
-public record RemoteAggregate(String outputName, String function, String field, String filter) {
+public record RemoteAggregate(String outputName, String function, String field, String filter, RemoteAggregateState intermediateState) {
 
     public RemoteAggregate {
         if (outputName == null || outputName.isEmpty()) {
@@ -39,8 +43,13 @@ public record RemoteAggregate(String outputName, String function, String field, 
         }
     }
 
+    /** A remote aggregate without an explicit intermediate-state recipe (legacy {@code [value, seen]} layout). */
+    public RemoteAggregate(String outputName, String function, String field, String filter) {
+        this(outputName, function, field, filter, null);
+    }
+
     /** A remote aggregate without a per-aggregate filter. */
     public RemoteAggregate(String outputName, String function, String field) {
-        this(outputName, function, field, null);
+        this(outputName, function, field, null, null);
     }
 }
