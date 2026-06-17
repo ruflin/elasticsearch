@@ -10,6 +10,7 @@ package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
+import org.elasticsearch.core.Booleans;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Nullability;
@@ -223,7 +224,7 @@ final class EsqlTypeMapping {
                 } else if (value instanceof Boolean b) {
                     builder.appendBoolean(b);
                 } else {
-                    builder.appendBoolean(Boolean.parseBoolean(value.toString()));
+                    builder.appendBoolean(Booleans.parseBoolean(value.toString()));
                 }
             }
             return builder.build();
