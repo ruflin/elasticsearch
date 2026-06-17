@@ -13,7 +13,8 @@
 #   Second single-node ES (Docker) :9201
 #        ^
 #        |  destination
-#   node scripts/sync_logs.js  <--- source logs* from SOURCE_ELASTICSEARCH_* (prompted if unset)
+#   node scripts/makelogs.js   <--- synthetic logs, no credentials (default; --makelogs)
+#   node scripts/sync_logs.js  <--- real logs* from SOURCE_ELASTICSEARCH_* (opt-in; --sync-logs)
 #
 # What it does:
 #   1. Starts a second single-node Elasticsearch cluster in Docker on :9201 (HTTP, security on).
@@ -22,8 +23,14 @@
 #   3. Starts Kibana from source (yarn start).
 #   4. Mints an API key on the second cluster and registers an ES|QL `elasticsearch` data source +
 #      dataset on the primary, pointing at the second cluster over plain HTTP (es:// scheme).
-#   5. Ships logs into the second cluster with `node scripts/sync_logs.js` (destination = :9201).
+#   5. Feeds logs into the second cluster: by default generates synthetic logs locally with
+#      @elastic/makelogs (no upstream cluster/credentials); with --sync-logs it instead copies real
+#      logs* from a SOURCE_ELASTICSEARCH_* cluster you provide.
 #   6. Verifies the data is queryable through the data source with `FROM remote_logs | STATS COUNT(*)`.
+#
+# Feed mode:
+#   (default / --makelogs)  Synthetic logs via makelogs.js; no credentials needed.
+#   --sync-logs             Copy real logs* from SOURCE_ELASTICSEARCH_HOST / _API_KEY (prompted if unset).
 #
 # Stop everything with Ctrl-C; the Docker container and all background processes are cleaned up.
 
@@ -54,6 +61,27 @@ SECOND_PASS="${SECOND_PASS:-changeme-second}"
 DATA_SOURCE_NAME="${DATA_SOURCE_NAME:-second_cluster}"
 DATASET_NAME="${DATASET_NAME:-remote_logs}"
 TARGET_INDEX="${TARGET_INDEX:-logs-synced}"
+
+# Data feed mode. The default ("makelogs") generates synthetic logs locally with @elastic/makelogs
+# (kibana/scripts/makelogs.js) and needs NO upstream cluster or credentials. Pass --sync-logs to use
+# scripts/sync_logs.js instead (copies real logs* from a SOURCE_ELASTICSEARCH_* cluster you provide).
+FEED_MODE="${FEED_MODE:-makelogs}"
+# makelogs writes into {MAKELOGS_PREFIX}{N} indices (e.g. logs-makelogs0) on the second cluster; the
+# dataset resolves the whole pattern via es://host/{MAKELOGS_PREFIX}*. We land in the logs-* namespace
+# on purpose. makelogs normally registers a legacy V1 index template for {prefix}*, which a stock cluster
+# rejects when it overlaps the built-in composable "logs-*-*" template; so we PRE-CREATE the destination
+# index (see ensure_makelogs_index) — makelogs then sees the index already exists and skips its template
+# entirely. The prefix is a single segment after "logs-" so the index does not match the data-stream-only
+# "logs-*-*" template (which would reject a plain index).
+MAKELOGS_PREFIX="${MAKELOGS_PREFIX:-logs-makelogs}"
+MAKELOGS_COUNT="${MAKELOGS_COUNT:-20000}"
+MAKELOGS_DAYS="${MAKELOGS_DAYS:-1/2}"
+
+# Elastic Inference Service. `yarn start --eis` (and `yarn es source --eis`) require reachable EIS
+# inference endpoints and abort Kibana with "No EIS inference endpoints found" when they are absent —
+# which they are in a credentials-free local demo. EIS is unrelated to the ES|QL data source, so it is
+# OFF by default; opt in with --eis (or USE_EIS=1) when you have EIS wired up.
+USE_EIS="${USE_EIS:-0}"
 
 # The `elasticsearch` data source stores its API key encrypted into cluster state. That requires the
 # project encryption key (PEK), which the master only installs once a wrapping password is present in
@@ -162,7 +190,11 @@ check_prereqs() {
   [[ -d "$ES_SOURCE_PATH" ]]   || die "Elasticsearch source path not found: $ES_SOURCE_PATH"
   [[ -d "$KIBANA_PATH" ]]      || die "Kibana path not found: $KIBANA_PATH"
   [[ -f "$KIBANA_CONFIG" ]]    || die "Kibana config not found: $KIBANA_CONFIG"
-  [[ -f "$KIBANA_PATH/scripts/sync_logs.js" ]] || die "sync_logs.js not found under $KIBANA_PATH/scripts"
+  if [[ "$FEED_MODE" == "makelogs" ]]; then
+    [[ -f "$KIBANA_PATH/scripts/makelogs.js" ]] || die "makelogs.js not found under $KIBANA_PATH/scripts"
+  else
+    [[ -f "$KIBANA_PATH/scripts/sync_logs.js" ]] || die "sync_logs.js not found under $KIBANA_PATH/scripts"
+  fi
 
   setup_node
   command -v node >/dev/null 2>&1 || die "node is required but not found on PATH."
@@ -181,6 +213,10 @@ check_prereqs() {
 # Source (sync_logs.js) configuration: read from env, prompt when unset
 # --------------------------------------------------------------------------------------------------
 resolve_sync_source() {
+  if [[ "$FEED_MODE" == "makelogs" ]]; then
+    log "Feed mode 'makelogs': generating synthetic logs locally; no source cluster/credentials needed."
+    return
+  fi
   if [[ -z "${SOURCE_ELASTICSEARCH_HOST:-}" ]]; then
     warn "SOURCE_ELASTICSEARCH_HOST is not set. sync_logs.js copies logs* from a source cluster."
     read -r -p "Enter SOURCE_ELASTICSEARCH_HOST (e.g. https://my-project.es.cloud:443): " SOURCE_ELASTICSEARCH_HOST
@@ -227,15 +263,18 @@ start_second_cluster() {
   done
   log "Second cluster is up at ${SECOND_HOST}."
 
-  # sync_logs.js creates the destination as a data stream, which needs a matching index template.
-  # The deterministic TARGET_INDEX (e.g. logs-synced) does not match the built-in logs-*-* pattern,
-  # so register a permissive data-stream template for it here.
-  log "Creating index template for data stream '${TARGET_INDEX}' on the second cluster..."
-  curl -sf -u "${SECOND_USER}:${SECOND_PASS}" \
-    -H 'Content-Type: application/json' \
-    -X PUT "${SECOND_HOST}/_index_template/${TARGET_INDEX}-template" \
-    -d "{\"index_patterns\":[\"${TARGET_INDEX}*\"],\"data_stream\":{},\"priority\":500,\"template\":{\"mappings\":{\"properties\":{\"@timestamp\":{\"type\":\"date\"}}}}}" \
-    >/dev/null || die "Failed to create index template on the second cluster."
+  # In sync_logs mode the destination is a data stream, which needs a matching index template. The
+  # deterministic TARGET_INDEX (e.g. logs-synced) does not match the built-in logs-*-* pattern, so
+  # register a permissive data-stream template for it here. makelogs mode manages its own plain indices
+  # and template, so this is skipped there.
+  if [[ "$FEED_MODE" == "sync_logs" ]]; then
+    log "Creating index template for data stream '${TARGET_INDEX}' on the second cluster..."
+    curl -sf -u "${SECOND_USER}:${SECOND_PASS}" \
+      -H 'Content-Type: application/json' \
+      -X PUT "${SECOND_HOST}/_index_template/${TARGET_INDEX}-template" \
+      -d "{\"index_patterns\":[\"${TARGET_INDEX}*\"],\"data_stream\":{},\"priority\":500,\"template\":{\"mappings\":{\"properties\":{\"@timestamp\":{\"type\":\"date\"}}}}}" \
+      >/dev/null || die "Failed to create index template on the second cluster."
+  fi
 }
 
 # --------------------------------------------------------------------------------------------------
@@ -247,10 +286,10 @@ start_primary_es() {
     es source
     "--source-path=${ES_SOURCE_PATH}"
     --license trial
-    --eis
     -E network.host=0.0.0.0
     -Des.esql_external_datasources_feature_flag_enabled=true
   )
+  [[ "$USE_EIS" == "1" ]] && es_args+=(--eis)
   if [[ -n "$GCS_CREDENTIALS_FILE" ]]; then
     es_args+=(--secure-files "gcs.client.default.credentials_file=${GCS_CREDENTIALS_FILE}")
   fi
@@ -274,9 +313,11 @@ start_primary_es() {
 
 start_kibana() {
   log "Starting Kibana from source..."
+  local eis_flag=""
+  [[ "$USE_EIS" == "1" ]] && eis_flag="--eis"
   ( cd "$KIBANA_PATH" \
       && KBN_USE_RSPACK=true yarn kbn bootstrap \
-      && exec yarn start --eis --config "$KIBANA_CONFIG" --no-base-path ) &
+      && exec yarn start ${eis_flag:+$eis_flag} --config "$KIBANA_CONFIG" --no-base-path ) &
   KIBANA_PID=$!
   log "Kibana is starting (this takes a while); it will be available at http://localhost:5601."
 }
@@ -368,17 +409,72 @@ register_data_source() {
     "${PRIMARY_HOST}/_query/data_source/${DATA_SOURCE_NAME}" \
     "{\"type\":\"elasticsearch\",\"description\":\"Second cluster (demo)\",\"settings\":{\"api_key\":\"${SECOND_API_KEY}\"}}"
 
-  log "Registering ES|QL dataset '${DATASET_NAME}' -> es://localhost:${SECOND_PORT}/${TARGET_INDEX}..."
+  # The dataset resource is the remote index (pattern) the feed writes to: a single data stream in
+  # sync_logs mode, or the makelogs {prefix}-<date> index pattern in makelogs mode.
+  local resource_index
+  if [[ "$FEED_MODE" == "makelogs" ]]; then
+    resource_index="${MAKELOGS_PREFIX}*"
+  else
+    resource_index="${TARGET_INDEX}"
+  fi
+  log "Registering ES|QL dataset '${DATASET_NAME}' -> es://localhost:${SECOND_PORT}/${resource_index}..."
   primary_put_with_retry \
     "register dataset" \
     "${PRIMARY_HOST}/_query/dataset/${DATASET_NAME}" \
-    "{\"data_source\":\"${DATA_SOURCE_NAME}\",\"resource\":\"es://localhost:${SECOND_PORT}/${TARGET_INDEX}\",\"settings\":{}}"
+    "{\"data_source\":\"${DATA_SOURCE_NAME}\",\"resource\":\"es://localhost:${SECOND_PORT}/${resource_index}\",\"settings\":{}}"
   log "Data source and dataset registered."
 }
 
 # --------------------------------------------------------------------------------------------------
 # Ship logs into the second cluster
 # --------------------------------------------------------------------------------------------------
+# Dispatch the configured data feed: synthetic generation (makelogs, default) or upstream copy (sync_logs).
+start_feed() {
+  if [[ "$FEED_MODE" == "makelogs" ]]; then
+    start_makelogs
+  else
+    start_sync_logs
+  fi
+}
+
+# Pre-create the makelogs destination index so makelogs does NOT load its legacy V1 index template.
+# makelogs creates a {prefix}* V1 template only when the destination index does not already exist; with
+# the index present it skips template creation and just bulk-indexes. This both keeps the docs in the
+# logs-* namespace and avoids the template overlap with the stock composable logs-*-* template. makelogs
+# names its first index {prefix}0, so we create exactly that. A single segment after "logs-" keeps the
+# name clear of the data-stream-only logs-*-* template (which rejects a plain index).
+ensure_makelogs_index() {
+  local index="${MAKELOGS_PREFIX}0"
+  log "Pre-creating makelogs destination index '${index}' on the second cluster (so makelogs loads no template)..."
+  curl -sf -u "${SECOND_USER}:${SECOND_PASS}" \
+    -H 'Content-Type: application/json' \
+    -X PUT "${SECOND_HOST}/${index}" \
+    -d '{"mappings":{"properties":{"@timestamp":{"type":"date"}}}}' \
+    >/dev/null || die "Failed to pre-create makelogs index '${index}' on the second cluster."
+}
+
+# Generate synthetic logs directly into the second cluster with @elastic/makelogs — no source cluster
+# or credentials required. makelogs runs to completion (it is not a tail), so we run it synchronously
+# and let verify_via_data_source confirm the docs landed. It writes into the pre-created
+# {MAKELOGS_PREFIX}0 index (in the logs-* namespace) that the dataset resolves via the
+# es://host/{MAKELOGS_PREFIX}* pattern.
+start_makelogs() {
+  ensure_makelogs_index
+  log "Generating ${MAKELOGS_COUNT} synthetic logs into the second cluster via makelogs (prefix '${MAKELOGS_PREFIX}', days ${MAKELOGS_DAYS})..."
+  (
+    cd "$KIBANA_PATH"
+    exec node scripts/makelogs.js \
+      --host "localhost:${SECOND_PORT}" \
+      --auth "${SECOND_USER}:${SECOND_PASS}" \
+      --indexPrefix "${MAKELOGS_PREFIX}" \
+      --count "${MAKELOGS_COUNT}" \
+      --days "${MAKELOGS_DAYS}" \
+      --no-reset \
+      --verbose
+  ) || die "makelogs failed to generate synthetic logs into the second cluster."
+  log "Synthetic log generation complete."
+}
+
 start_sync_logs() {
   log "Shipping logs into the second cluster via scripts/sync_logs.js (destination :${SECOND_PORT})..."
   (
@@ -401,12 +497,19 @@ start_sync_logs() {
 # Verify the data is queryable through the data source
 # --------------------------------------------------------------------------------------------------
 verify_via_data_source() {
-  log "Waiting for documents to land in the second cluster..."
+  # The remote index (pattern) the feed wrote to: makelogs {prefix}-* or the sync_logs data stream.
+  local count_index
+  if [[ "$FEED_MODE" == "makelogs" ]]; then
+    count_index="${MAKELOGS_PREFIX}*"
+  else
+    count_index="${TARGET_INDEX}"
+  fi
+  log "Waiting for documents to land in the second cluster (${count_index})..."
   local deadline=$(( $(date +%s) + 180 ))
   local count=0
   while [[ $(date +%s) -lt $deadline ]]; do
     count=$(curl -sf -u "${SECOND_USER}:${SECOND_PASS}" \
-      "${SECOND_HOST}/${TARGET_INDEX}/_count" 2>/dev/null \
+      "${SECOND_HOST}/${count_index}/_count" 2>/dev/null \
       | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String((JSON.parse(s).count)||0))}catch(e){process.stdout.write("0")}})' 2>/dev/null || echo 0)
     if [[ "${count:-0}" -gt 0 ]]; then
       break
@@ -415,12 +518,12 @@ verify_via_data_source() {
   done
 
   if [[ "${count:-0}" -le 0 ]]; then
-    warn "No documents in ${TARGET_INDEX} on the second cluster yet; the source may have no logs* in the last 24h."
+    warn "No documents in ${count_index} on the second cluster yet."
     warn "The data source is still registered; once logs arrive they will be queryable."
     return
   fi
 
-  log "Second cluster has ${count} document(s) in ${TARGET_INDEX}. Querying through the data source on the primary..."
+  log "Second cluster has ${count} document(s) in ${count_index}. Querying through the data source on the primary..."
   log "Query: FROM ${DATASET_NAME} | STATS c = COUNT(*)"
   curl -sf -u "${PRIMARY_USER}:${PRIMARY_PASS}" \
     -H 'Content-Type: application/json' \
@@ -433,7 +536,25 @@ verify_via_data_source() {
 # --------------------------------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------------------------------
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --makelogs)   FEED_MODE="makelogs" ;;
+      --sync-logs)  FEED_MODE="sync_logs" ;;
+      --eis)        USE_EIS="1" ;;
+      --no-eis)     USE_EIS="0" ;;
+      -h|--help)
+        grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
+        exit 0
+        ;;
+      *) die "Unknown argument: $1 (use --makelogs [default] or --sync-logs)" ;;
+    esac
+    shift
+  done
+}
+
 main() {
+  parse_args "$@"
   check_prereqs
   resolve_sync_source
   start_second_cluster
@@ -442,13 +563,15 @@ main() {
   bootstrap_encryption_key
   mint_second_cluster_api_key
   register_data_source
-  start_sync_logs
+  start_feed
   verify_via_data_source
 
+  local remote_index
+  if [[ "$FEED_MODE" == "makelogs" ]]; then remote_index="${MAKELOGS_PREFIX}*"; else remote_index="${TARGET_INDEX}"; fi
   log "All set. Topology is running:"
   log "  - Kibana:          http://localhost:5601"
   log "  - Primary ES:      ${PRIMARY_HOST}  (data source '${DATA_SOURCE_NAME}', dataset '${DATASET_NAME}')"
-  log "  - Second ES:       ${SECOND_HOST}   (index '${TARGET_INDEX}')"
+  log "  - Second ES:       ${SECOND_HOST}   (index '${remote_index}', feed '${FEED_MODE}')"
   log "Try in Kibana / Console:  FROM ${DATASET_NAME} | LIMIT 10"
   log "Press Ctrl-C to stop everything and clean up."
   wait
