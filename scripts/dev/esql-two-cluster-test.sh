@@ -216,7 +216,8 @@ create_remote_index() {
             \"service.name\":               { \"type\": \"keyword\" },
             \"log.level\":                  { \"type\": \"keyword\" },
             \"http.response.status_code\":  { \"type\": \"long\" },
-            \"event.duration\":             { \"type\": \"long\" }
+            \"event.duration\":             { \"type\": \"long\" },
+            \"metric.value\":               { \"type\": \"double\" }
           }
         }
       }
@@ -252,8 +253,10 @@ ingest_synthetic_logs() {
           # Spread timestamps over the last ~12h so BUCKET / DATE_TRUNC produce several buckets.
           ts = now - ((g % 720) * 60000);
           dur = ((g * 37) % 5000) + 1;
+          # A genuine double metric (fractional) so SUM/AVG exercise the double intermediate layout [value, delta, seen].
+          mval = (((g * 37) % 5000) + 1) / 7.0;
           printf "{\"create\":{}}\n";
-          printf "{\"@timestamp\":%d,\"message\":\"request %d on %s\",\"data_stream.dataset\":\"%s\",\"host.name\":\"%s\",\"service.name\":\"%s\",\"log.level\":\"%s\",\"http.response.status_code\":%s,\"event.duration\":%d}\n", ts, g, svc, ds, host, svc, lvl, code, dur;
+          printf "{\"@timestamp\":%d,\"message\":\"request %d on %s\",\"data_stream.dataset\":\"%s\",\"host.name\":\"%s\",\"service.name\":\"%s\",\"log.level\":\"%s\",\"http.response.status_code\":%s,\"event.duration\":%d,\"metric.value\":%.6f}\n", ts, g, svc, ds, host, svc, lvl, code, dur, mval;
         }
       }
     ' > /tmp/esql-2c-bulk.ndjson
@@ -686,15 +689,40 @@ run_verification_suite() {
     "FROM ${D} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`)" \
     "FROM ${T} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`)"
 
+  # 22. (SUM) Grouped SUM over a long metric. SUM-long uses the [sum, seen] intermediate layout; the connector
+  # emits it from the recipe and the FINAL merge must equal direct-remote.
+  assert_match "grouped SUM(long) metric BY keyword" \
+    "FROM ${D} | STATS s = SUM(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS s = SUM(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 23. (SUM) Ungrouped SUM over the whole long metric stream.
+  assert_match "ungrouped SUM(long) metric" \
+    "FROM ${D} | STATS s = SUM(\`event.duration\`)" \
+    "FROM ${T} | STATS s = SUM(\`event.duration\`)"
+
+  # 24. (SUM) Grouped SUM over a genuine double metric. SUM-double uses the three-channel [value, delta, seen]
+  # layout; the connector fills the Kahan delta with 0 for the single partial, so the FINAL merge equals
+  # direct-remote.
+  assert_match "grouped SUM(double) metric BY keyword" \
+    "FROM ${D} | STATS s = SUM(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS s = SUM(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 25. (AVG) Grouped AVG over the double metric. AVG is a surrogate over SUM(double)/COUNT, both of which push;
+  # the Div runs locally over the merged partials and must equal direct-remote.
+  assert_match "grouped AVG(double) metric BY keyword" \
+    "FROM ${D} | STATS a = AVG(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS a = AVG(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`"
+
   log "-- Known pushdown gaps (probes; non-fatal) -------------------"
   # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
   # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
 
-  # SUM/AVG have a multi-channel intermediate aggregator layout the connector does not yet emit, so a grouped
-  # SUM/AVG falls back to local STATS over the connector's capped page — still an open pushdown gap.
-  probe_gap "grouped SUM/AVG metric BY keyword" \
-    "FROM ${D} | STATS s = SUM(\`event.duration\`), a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
-    "FROM ${T} | STATS s = SUM(\`event.duration\`), a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
+  # AVG over a long input surrogates to SUM(TO_DOUBLE(duration))/COUNT, whose SUM input is a computed expression
+  # (not a plain source attribute) and so is not pushed; the STATS falls back to local execution. It still must be
+  # numerically correct, so we probe it: a mismatch here would indicate a paging/local-fallback correctness bug.
+  probe_gap "grouped AVG(long) metric BY keyword (local fallback)" \
+    "FROM ${D} | STATS a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
 
   echo
   log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (correctness assertions)."

@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.optimizer.rules.physical.local;
 
 import org.elasticsearch.compute.aggregation.AggregatorMode;
+import org.elasticsearch.compute.aggregation.IntermediateStateDesc;
 import org.elasticsearch.xpack.esql.core.expression.Alias;
 import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
@@ -16,17 +17,20 @@ import org.elasticsearch.xpack.esql.core.expression.NamedExpression;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregateState;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.AggregateFunction;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
+import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.PhysicalOptimizerRules;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
 import org.elasticsearch.xpack.esql.plan.physical.EvalExec;
 import org.elasticsearch.xpack.esql.plan.physical.ExternalSourceExec;
 import org.elasticsearch.xpack.esql.plan.physical.PhysicalPlan;
+import org.elasticsearch.xpack.esql.planner.AggregateMapper;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -148,15 +152,17 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         for (Attribute attr : ext.output()) {
             sourceFieldNames.add(attr.name());
         }
+        boolean grouped = groupings.isEmpty() == false;
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
         for (NamedExpression agg : aggregateExec.aggregates()) {
             if (agg instanceof Alias alias && alias.child() instanceof AggregateFunction fn) {
-                // COUNT/MIN/MAX share the two-channel [value, seen] intermediate layout and are supported both
-                // ungrouped and grouped: the connector now derives the seen marker from each value's nullness, so a
-                // grouped MIN/MAX that is null for a group (all inputs null) is correctly skipped by the FINAL
-                // merge. SUM/AVG have a different intermediate layout and return null from toRemoteAggregate below,
-                // leaving the whole STATS for local execution.
-                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames);
+                // COUNT/MIN/MAX/SUM are supported both ungrouped and grouped. The connector emits each aggregate's
+                // intermediate state from a recipe (RemoteAggregateState) the rule derives from the function's
+                // intermediate-state descriptor, deriving the seen marker from value nullness (so a null per-group
+                // result is skipped by the FINAL merge) and filling auxiliary channels (SUM-double's Kahan delta,
+                // SUM-long's overflow failed) with their identity value. AVG is a surrogate over SUM+COUNT and never
+                // reaches here. Anything else returns null from toRemoteAggregate and leaves the STATS local.
+                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames, grouped);
                 if (remote == null) {
                     return aggregateExec;
                 }
@@ -227,16 +233,21 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
      * Projects a supported aggregate function to its {@link RemoteAggregate}, or {@code null} when the function is
      * outside this step's scope (which leaves the plan untouched).
      *
-     * <p>Only aggregates whose intermediate aggregator state is the two-channel {@code [value, seen]} layout are
-     * supported, because the connector emits intermediate state by interleaving a single {@code seen} marker after
-     * each value block. COUNT, MIN and MAX share that layout. SUM (DOUBLE adds a Kahan {@code delta} channel) and
-     * AVG (a {@code sum}+{@code count} pair) do not and are handled in a later step.
+     * <p>COUNT, MIN and MAX use the two-channel {@code [value, seen]} layout and carry no explicit recipe (the
+     * connector falls back to it). SUM carries an explicit {@link RemoteAggregateState} recipe because its layout is
+     * type-dependent (SUM-double adds a Kahan {@code delta}, SUM-long may add an overflow {@code failed} channel).
+     * AVG is a surrogate over SUM+COUNT and is rewritten before the physical plan, so it never reaches this rule.
      *
      * <p>A per-aggregate filter ({@code COUNT(*) WHERE <pred>}) is forwarded by rendering the predicate's source
      * text; it is pushed only when {@code <pred>} references plain source columns (in {@code sourceFieldNames}) the
      * remote knows under the same name, otherwise the aggregate is left for local execution.
      */
-    private static RemoteAggregate toRemoteAggregate(String outputName, AggregateFunction fn, Set<String> sourceFieldNames) {
+    private static RemoteAggregate toRemoteAggregate(
+        String outputName,
+        AggregateFunction fn,
+        Set<String> sourceFieldNames,
+        boolean grouped
+    ) {
         String filter = renderAggregateFilter(fn, sourceFieldNames);
         if (fn.hasFilter() && filter == null) {
             // A filter is present but cannot be safely forwarded; leave the whole aggregate to local execution.
@@ -256,7 +267,44 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         if (fn instanceof Max max) {
             return fieldAggregate(outputName, "MAX", max.field(), filter);
         }
+        if (fn instanceof Sum sum) {
+            // SUM needs an explicit intermediate-state recipe (delta / failed channels). A windowed SUM has a
+            // different intermediate layout this recipe does not capture, so only push the non-windowed form. (A
+            // per-aggregate filter is handled separately above and is compatible.)
+            if (AggregateFunction.NO_WINDOW.equals(sum.window()) == false) {
+                return null;
+            }
+            if (sum.field() instanceof Attribute attr) {
+                return new RemoteAggregate(outputName, "SUM", attr.name(), filter, intermediateState(fn, grouped));
+            }
+            return null;
+        }
         return null;
+    }
+
+    /**
+     * Builds the {@link RemoteAggregateState} recipe for an aggregate from its intermediate-state descriptor: the
+     * first channel is the primary {@code VALUE}, a {@code seen} channel is {@code SEEN}, and every other channel is
+     * {@code NEUTRAL} (filled by the connector with its identity value). This mirrors the channel conventions shared
+     * by the pushed aggregates and lets the connector emit intermediate state without depending on aggregator
+     * internals.
+     */
+    private static RemoteAggregateState intermediateState(AggregateFunction fn, boolean grouped) {
+        List<IntermediateStateDesc> descs = AggregateMapper.intermediateStateDesc(fn, grouped);
+        List<RemoteAggregateState.Channel> channels = new ArrayList<>(descs.size());
+        for (int i = 0; i < descs.size(); i++) {
+            IntermediateStateDesc desc = descs.get(i);
+            RemoteAggregateState.Role role;
+            if (i == 0) {
+                role = RemoteAggregateState.Role.VALUE;
+            } else if (desc.name().equals("seen")) {
+                role = RemoteAggregateState.Role.SEEN;
+            } else {
+                role = RemoteAggregateState.Role.NEUTRAL;
+            }
+            channels.add(new RemoteAggregateState.Channel(desc.name(), desc.type(), role));
+        }
+        return new RemoteAggregateState(channels);
     }
 
     /**

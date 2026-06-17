@@ -14,6 +14,7 @@ import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
+import org.elasticsearch.compute.data.ElementType;
 import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -27,6 +28,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalServerException;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregateState;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
@@ -355,9 +357,13 @@ class ElasticsearchConnector implements Connector {
      * plan expects, so the surviving {@code FINAL} aggregate merges the connector's single partial. That layout is
      * {@code [group key(s)..., per-aggregate (value, seen)...]} — grouping keys first, then for each aggregate a
      * value block followed by an all-true {@code seen} boolean. The remote {@code STATS ... BY} response instead
-     * returns {@code [aggregate(s)..., group key(s)...]}, so we look columns up by name and reorder. All supported
-     * aggregates (COUNT, MIN, MAX) use the two-channel {@code [value, seen]} state, so a single {@code seen} per
-     * aggregate is correct.
+     * returns {@code [aggregate(s)..., group key(s)...]}, so we look columns up by name and reorder.
+     *
+     * <p>Each aggregate's intermediate layout is driven by its {@link RemoteAggregate#intermediateState()} recipe:
+     * the primary {@code VALUE} channel is filled from the decoded remote column, the {@code SEEN} channel from the
+     * value's nullness (so a null per-group MIN/MAX/SUM is skipped by the FINAL merge), and any auxiliary channel
+     * (SUM-double's Kahan {@code delta}, SUM-long's overflow {@code failed}) with its identity value. COUNT / MIN /
+     * MAX carry no recipe and fall back to the two-channel {@code [value, seen]} layout.
      */
     private static Block[] buildIntermediateAggregateBlocks(
         List<EsqlTypeMapping.RemoteColumn> columns,
@@ -372,7 +378,11 @@ class ElasticsearchConnector implements Connector {
         }
         List<RemoteGrouping> groupings = request.pushedGroupings();
         List<RemoteAggregate> aggregates = request.pushedAggregates();
-        Block[] blocks = new Block[groupings.size() + aggregates.size() * 2];
+        int aggregateBlocks = 0;
+        for (RemoteAggregate aggregate : aggregates) {
+            aggregateBlocks += aggregate.intermediateState() == null ? 2 : aggregate.intermediateState().channels().size();
+        }
+        Block[] blocks = new Block[groupings.size() + aggregateBlocks];
         boolean success = false;
         try {
             int out = 0;
@@ -381,25 +391,23 @@ class ElasticsearchConnector implements Connector {
             for (RemoteGrouping grouping : groupings) {
                 blocks[out++] = decodeColumnByName(grouping.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
             }
-            // Each aggregate becomes a (value, seen) pair. The seen marker must reflect per-row presence: a grouped
-            // MIN/MAX is null for a group whose values are all null, and a null value with seen=true would be merged
-            // by the FINAL aggregate as a real result. COUNT is always a dense non-null long (seen is always true),
-            // but deriving seen from the value's nullness is correct for COUNT too, so it is applied uniformly.
             for (RemoteAggregate aggregate : aggregates) {
                 Integer index = columnIndexByName.get(aggregate.outputName());
                 if (index == null) {
                     throw new IllegalStateException("Remote ES|QL response is missing expected column [" + aggregate.outputName() + "]");
                 }
                 List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
-                blocks[out++] = decodeColumnByName(
-                    aggregate.outputName(),
+                out = appendIntermediateChannels(
+                    blocks,
+                    out,
+                    aggregate,
                     columnIndexByName,
                     columns,
                     columnValues,
+                    values,
                     rowCount,
                     blockFactory
                 );
-                blocks[out++] = buildSeenBlock(values, rowCount, blockFactory);
             }
             success = true;
         } finally {
@@ -408,6 +416,54 @@ class ElasticsearchConnector implements Connector {
             }
         }
         return blocks;
+    }
+
+    /**
+     * Appends the intermediate-state blocks for one aggregate, returning the next output index. Uses the aggregate's
+     * {@link RemoteAggregateState} recipe, or the legacy {@code [value, seen]} layout when no recipe is present.
+     */
+    private static int appendIntermediateChannels(
+        Block[] blocks,
+        int out,
+        RemoteAggregate aggregate,
+        Map<String, Integer> columnIndexByName,
+        List<EsqlTypeMapping.RemoteColumn> columns,
+        List<List<Object>> columnValues,
+        List<Object> values,
+        int rowCount,
+        BlockFactory blockFactory
+    ) {
+        RemoteAggregateState state = aggregate.intermediateState();
+        if (state == null) {
+            // Legacy [value, seen]: COUNT / MIN / MAX. The seen marker reflects per-row presence so a null grouped
+            // MIN/MAX is skipped by the FINAL merge; COUNT is always dense, so deriving seen from nullness is a no-op.
+            blocks[out++] = decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
+            blocks[out++] = buildSeenBlock(values, rowCount, blockFactory);
+            return out;
+        }
+        for (RemoteAggregateState.Channel channel : state.channels()) {
+            blocks[out++] = switch (channel.role()) {
+                case VALUE -> decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
+                case SEEN -> buildSeenBlock(values, rowCount, blockFactory);
+                case NEUTRAL -> buildNeutralBlock(channel.type(), rowCount, blockFactory);
+            };
+        }
+        return out;
+    }
+
+    /**
+     * Builds an auxiliary intermediate-state channel filled with its identity value: {@code 0} for numeric channels
+     * (e.g. SUM-double's Kahan {@code delta}) and {@code false} for boolean channels (e.g. SUM-long's overflow
+     * {@code failed}). For a single already-computed partial these identities leave the merged result unchanged.
+     */
+    private static Block buildNeutralBlock(ElementType type, int rowCount, BlockFactory blockFactory) {
+        return switch (type) {
+            case DOUBLE -> blockFactory.newConstantDoubleBlockWith(0.0, rowCount);
+            case LONG -> blockFactory.newConstantLongBlockWith(0L, rowCount);
+            case INT -> blockFactory.newConstantIntBlockWith(0, rowCount);
+            case BOOLEAN -> blockFactory.newConstantBooleanBlockWith(false, rowCount);
+            default -> throw new IllegalStateException("Unsupported neutral intermediate channel type [" + type + "]");
+        };
     }
 
     private static Block decodeColumnByName(
