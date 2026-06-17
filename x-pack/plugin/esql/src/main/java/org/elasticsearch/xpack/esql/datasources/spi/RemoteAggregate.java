@@ -69,14 +69,13 @@ public record RemoteAggregate(
         this(outputName, function, field, null, filter, intermediateState);
     }
 
-    /** A remote aggregate over a plain field without an explicit intermediate-state recipe. */
-    public RemoteAggregate(String outputName, String function, String field, String filter) {
-        this(outputName, function, field, null, filter, null);
-    }
-
-    /** A remote aggregate over a plain field without a per-aggregate filter. */
-    public RemoteAggregate(String outputName, String function, String field) {
-        this(outputName, function, field, null, null, null);
+    /**
+     * A remote aggregate over a plain field (or {@code COUNT(*)} when {@code field} is {@code null}) with no filter
+     * and no explicit intermediate-state recipe. Convenience for query-rendering call sites that do not exercise
+     * partial-state decode (the recipe and filter do not affect the rendered remote {@code STATS}).
+     */
+    public static RemoteAggregate of(String outputName, String function, String field) {
+        return new RemoteAggregate(outputName, function, field, null, null, null);
     }
 
     /**
