@@ -273,6 +273,22 @@ ingest_synthetic_logs() {
 # --------------------------------------------------------------------------------------------------
 # Primary ES from source (./gradlew :run)
 # --------------------------------------------------------------------------------------------------
+# The PEK bootstrap needs the `elasticsearch-keystore` CLI, which `./gradlew :run` does NOT leave on disk
+# (its testcluster work dir under build/testclusters/runTask-0 holds only config/, data/, logs/ — no bin/).
+# The `localDistro` task installs an extracted distribution to build/distribution/local/elasticsearch-<ver>/
+# which DOES contain bin/elasticsearch-keystore. We build it up front so bootstrap_encryption_key can find
+# the CLI; most of the work is shared with the :run build and comes from the Gradle cache.
+build_local_distro() {
+  [[ "$START_PRIMARY" == "1" ]] || return 0
+  if [[ -n "$(find_run_keystore)" ]]; then
+    log "Local distribution already present; skipping localDistro build."
+    return 0
+  fi
+  log "Building a local distribution (./gradlew localDistro) so the elasticsearch-keystore CLI is available..."
+  ( cd "$ES_SOURCE_PATH" && ./gradlew localDistro --console=plain ) \
+    || warn "localDistro build failed; PEK bootstrap may be skipped and the data source PUT may 503."
+}
+
 start_primary_es() {
   [[ "$START_PRIMARY" == "1" ]] || { log "--no-run: skipping primary from source."; return; }
   log "Starting primary Elasticsearch from source (${ES_SOURCE_PATH}) on ${PRIMARY_HOST} via ./gradlew :run..."
@@ -338,11 +354,15 @@ bootstrap_encryption_key() {
   keystore="$(find_run_keystore)"
   config_dir="$(find_run_config_dir)"
   if [[ -z "$keystore" || ! -x "$keystore" ]]; then
-    warn "Could not locate the elasticsearch-keystore CLI (build a local distro first); skipping PEK bootstrap (data source PUT may 503)."
+    local msg="Could not locate the elasticsearch-keystore CLI (expected under build/distribution/local; run localDistro). Without it the PEK is never installed and the data source PUT 503s forever."
+    [[ "$MODE_CI" == "1" ]] && die "$msg"
+    warn "$msg Skipping PEK bootstrap."
     return
   fi
   if [[ -z "$config_dir" || ! -d "$config_dir" ]]; then
-    warn "Could not locate the :run node config dir; skipping PEK bootstrap (data source PUT may 503)."
+    local msg="Could not locate the :run node config dir (build/testclusters/*/config). Without it the PEK is never installed and the data source PUT 503s forever."
+    [[ "$MODE_CI" == "1" ]] && die "$msg"
+    warn "$msg Skipping PEK bootstrap."
     return
   fi
   log "Configuring project encryption key password in the primary keystore (config: ${config_dir})..."
@@ -424,7 +444,20 @@ register_data_source() {
 # --------------------------------------------------------------------------------------------------
 # Verification suite
 # --------------------------------------------------------------------------------------------------
-# Runs an ES|QL query through the primary and prints the txt result. Echoes the query first.
+# The suite is built around one idea: run a query through the connector (primary) and the SAME query
+# directly against the remote, then compare the normalized JSON `values`. If they match, the connector
+# returned the full, correct result; if they differ, the connector silently degraded (e.g. computed a
+# STATS locally over its implicitly-capped first page). This is the gold-standard check the live ITs use
+# and it catches the whole "capped page -> wrong total" class of bugs.
+#
+# Two assertion flavors:
+#   assert_match        — a correctness invariant that MUST hold today. A mismatch is a real failure.
+#   probe_gap           — a KNOWN pushdown gap. We still compare, but a mismatch is reported as
+#                         "GAP (still open)" without failing CI, and an unexpected match is reported as
+#                         "GAP CLOSED" (a signal to flip it into assert_match). This makes the script a
+#                         living regression signal for the pushdown work rather than printing raw rows.
+
+# Runs an ES|QL query through the primary connector and prints the txt result. Echoes the query first.
 run_query() {
   local q="$1"
   echo
@@ -435,43 +468,179 @@ run_query() {
     -d "{\"query\":\"${q}\"}"
 }
 
-# Asserts that `FROM dataset | STATS c = COUNT(*)` returns exactly DOC_COUNT (i.e. the count was pushed
-# down and computed over the full remote data set rather than the local LIMIT-1000 page).
-assert_total_count() {
-  local q="FROM ${DATASET_NAME} | STATS c = COUNT(*)"
-  local out count
-  out="$(curl -s -u "${PRIMARY_USER}:${PRIMARY_PASS}" -H 'Content-Type: application/json' \
-    -X POST "${PRIMARY_HOST}/_query?format=json" -d "{\"query\":\"${q}\"}")"
-  count="$(printf '%s' "$out" | sed -n 's/.*"values":\[\[\([0-9]*\)\]\].*/\1/p')"
-  if [[ "$count" == "$DOC_COUNT" ]]; then
-    pass "ungrouped COUNT(*) pushed down (= ${DOC_COUNT})"
+# Runs an ES|QL query through the connector on the primary and prints the raw JSON response on stdout.
+connector_json() {
+  local q="$1"
+  curl -s -u "${PRIMARY_USER}:${PRIMARY_PASS}" -H 'Content-Type: application/json' \
+    -X POST "${PRIMARY_HOST}/_query?format=json" -d "{\"query\":\"${q}\"}"
+}
+
+# Runs an ES|QL query directly against the remote cluster (the data-source target) and prints the raw
+# JSON response on stdout. The remote query targets TARGET_INDEX directly instead of the dataset name.
+remote_json() {
+  local q="$1"
+  curl -s -u "${REMOTE_USER}:${REMOTE_PASS}" -H 'Content-Type: application/json' \
+    -X POST "${REMOTE_HOST}/_query?format=json" -d "{\"query\":\"${q}\"}"
+}
+
+# Extracts and normalizes the `values` 2-D array from an ES|QL JSON response so two responses can be
+# compared regardless of column-order/whitespace noise: emit one canonical line per row, rows sorted.
+# Uses awk only (no jq/node dependency, matching the rest of the script). It strips everything up to
+# "values":, then splits the array into rows on "],[" and prints each row trimmed, finally `sort`s them.
+normalize_values() {
+  awk '
+    {
+      v = $0
+      i = index(v, "\"values\":")
+      if (i == 0) { next }
+      v = substr(v, i + 9)            # drop up to and including "values":
+      # trim the trailing "}" / "]" wrapper noise; keep the outer [...] of values
+      sub(/\][^]]*$/, "]", v)
+      gsub(/^\[/, "", v); sub(/\]$/, "", v)   # remove the outermost [ ]
+      gsub(/\],\[/, "]\n[", v)        # one row per line
+      print v
+    }
+  ' | sed -E 's/^\[//; s/\]$//' | sort
+}
+
+# Returns 0 if the connector and direct-remote results for the given query are identical (normalized).
+# Args: <connector-query> <remote-query>
+results_match() {
+  local cq="$1" rq="$2" c r
+  c="$(connector_json "$cq" | normalize_values)"
+  r="$(remote_json "$rq" | normalize_values)"
+  [[ "$c" == "$r" ]]
+}
+
+# Correctness invariant: connector result MUST equal the direct-remote result.
+# Args: <label> <connector-query> <remote-query>
+assert_match() {
+  local label="$1" cq="$2" rq="$3"
+  if results_match "$cq" "$rq"; then
+    pass "${label}"
   else
-    fail "ungrouped COUNT(*) expected ${DOC_COUNT}, got [${count}] (raw: ${out})"
+    fail "${label} — connector result differs from direct-remote result"
+    warn "  connector: $(connector_json "$cq")"
+    warn "  remote:    $(remote_json "$rq")"
+  fi
+}
+
+# Known-gap probe: compare but do not fail CI. Reports whether the gap is still open or has been closed.
+# Args: <label> <connector-query> <remote-query>
+probe_gap() {
+  local label="$1" cq="$2" rq="$3"
+  if results_match "$cq" "$rq"; then
+    printf '\033[1;32m[2c] GAP CLOSED\033[0m %s — connector now matches direct-remote; promote to assert_match.\n' "$label"
+  else
+    printf '\033[1;33m[2c] GAP (open)\033[0m %s — connector degrades vs direct-remote (expected until pushdown lands).\n' "$label"
+  fi
+}
+
+# Asserts a scalar (single-cell) connector result equals an expected value.
+# Args: <label> <connector-query> <expected>
+assert_scalar() {
+  local label="$1" cq="$2" expected="$3" out got
+  out="$(connector_json "$cq")"
+  got="$(printf '%s' "$out" | sed -n 's/.*"values":\[\[\([^]]*\)\]\].*/\1/p')"
+  if [[ "$got" == "$expected" ]]; then
+    pass "${label} (= ${expected})"
+  else
+    fail "${label} expected [${expected}], got [${got}] (raw: ${out})"
+  fi
+}
+
+# Asserts a `... | LIMIT n` connector query returns exactly n rows. Args: <label> <connector-query> <n>
+assert_row_count() {
+  local label="$1" cq="$2" n="$3" out rows
+  out="$(connector_json "$cq")"
+  # Count rows by counting the row separators "],[" in values plus one (when values is non-empty).
+  rows="$(printf '%s' "$out" | normalize_values | grep -c . || true)"
+  if [[ "$rows" == "$n" ]]; then
+    pass "${label} (= ${n} rows)"
+  else
+    fail "${label} expected ${n} rows, got ${rows} (raw: ${out})"
   fi
 }
 
 run_verification_suite() {
   [[ "$START_PRIMARY" == "1" ]] || { log "--no-run: skipping verification suite."; return; }
   log "=============================================================="
-  log "Verification suite (the grouped-pushdown gaps from the plan)"
+  log "Verification suite — connector result vs. direct-remote result"
   log "=============================================================="
 
-  # Currently working: ungrouped + single keyword field grouping push down fully.
-  assert_total_count
-  run_query "FROM ${DATASET_NAME} | STATS c = COUNT(*) BY \`data_stream.dataset\` | SORT c DESC"
+  local D="${DATASET_NAME}" T="${TARGET_INDEX}"
 
-  # Known gaps — these should run (correctness is preserved by the local safety net) but today they
-  # degrade to the local 1000-row page (wrong totals) or error. They are here so the script surfaces
-  # the current behavior and will validate the fix once the pushdown work lands.
-  run_query "FROM ${DATASET_NAME} | STATS c = COUNT(*) BY BUCKET(@timestamp, 1 hour) | SORT c DESC"
-  run_query "FROM ${DATASET_NAME} | STATS c = COUNT(*) BY DATE_TRUNC(1 hour, @timestamp) | SORT c DESC"
-  run_query "FROM ${DATASET_NAME} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT c DESC"
-  run_query "FROM ${DATASET_NAME} | STATS c = COUNT(*) BY \`host.name\`, \`service.name\` | SORT c DESC"
+  log "-- Correctness invariants (must pass today) ------------------"
+
+  # 1. Ungrouped COUNT(*) is pushed down and computed over the full remote data set.
+  assert_scalar "ungrouped COUNT(*) pushed down" "FROM ${D} | STATS c = COUNT(*)" "${DOC_COUNT}"
+
+  # 2. Grouped COUNT by a single keyword field matches the direct-remote histogram exactly.
+  assert_match "grouped COUNT BY keyword (data_stream.dataset)" \
+    "FROM ${D} | STATS c = COUNT(*) BY \`data_stream.dataset\` | SORT \`data_stream.dataset\`" \
+    "FROM ${T} | STATS c = COUNT(*) BY \`data_stream.dataset\` | SORT \`data_stream.dataset\`"
+
+  # 3. The single-keyword grouped counts sum back to the full document count (no capped page).
+  assert_scalar "grouped COUNT BY keyword sums to total" \
+    "FROM ${D} | STATS c = COUNT(*) BY \`service.name\` | STATS t = SUM(c)" "${DOC_COUNT}"
+
+  # 4. Pushed-down filter (== on a keyword) matches the direct-remote filtered count.
+  assert_match "filtered COUNT (WHERE log.level == ERROR)" \
+    "FROM ${D} | WHERE \`log.level\` == \\\"ERROR\\\" | STATS c = COUNT(*)" \
+    "FROM ${T} | WHERE \`log.level\` == \\\"ERROR\\\" | STATS c = COUNT(*)"
+
+  # 5. Numeric range filter (>=) matches direct-remote.
+  assert_match "filtered COUNT (WHERE status_code >= 500)" \
+    "FROM ${D} | WHERE \`http.response.status_code\` >= 500 | STATS c = COUNT(*)" \
+    "FROM ${T} | WHERE \`http.response.status_code\` >= 500 | STATS c = COUNT(*)"
+
+  # 6. Compound AND/OR filter matches direct-remote.
+  assert_match "filtered COUNT (WHERE level==WARN OR code==404)" \
+    "FROM ${D} | WHERE \`log.level\` == \\\"WARN\\\" OR \`http.response.status_code\` == 404 | STATS c = COUNT(*)" \
+    "FROM ${T} | WHERE \`log.level\` == \\\"WARN\\\" OR \`http.response.status_code\` == 404 | STATS c = COUNT(*)"
+
+  # 7. SORT + LIMIT (top-N projection) returns the same rows as the direct-remote query.
+  assert_match "SORT + KEEP + LIMIT top-N" \
+    "FROM ${D} | SORT \`event.duration\` DESC, \`message.keyword\` ASC | KEEP \`event.duration\`, \`host.name\` | LIMIT 25" \
+    "FROM ${T} | SORT \`event.duration\` DESC, \`message.keyword\` ASC | KEEP \`event.duration\`, \`host.name\` | LIMIT 25"
+
+  # 8. Plain LIMIT returns exactly the requested number of rows.
+  assert_row_count "plain LIMIT returns n rows" "FROM ${D} | LIMIT 37" 37
+
+  # 9. Grouped COUNT by TWO keyword fields matches the direct-remote result. Multi-field grouping is
+  # pushed down on this branch (verified by the two-cluster harness), so this is a correctness invariant.
+  assert_match "grouped COUNT BY two keyword fields" \
+    "FROM ${D} | STATS c = COUNT(*) BY \`host.name\`, \`service.name\` | SORT \`host.name\`, \`service.name\`" \
+    "FROM ${T} | STATS c = COUNT(*) BY \`host.name\`, \`service.name\` | SORT \`host.name\`, \`service.name\`"
+
+  log "-- Known pushdown gaps (probes; non-fatal) -------------------"
+  # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
+  # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
+
+  # Grouped COUNT BY a time BUCKET — the SigEvents histogram core (function grouping not pushed).
+  probe_gap "grouped COUNT BY BUCKET(@timestamp, 1 hour)" \
+    "FROM ${D} | STATS c = COUNT(*) BY b = BUCKET(@timestamp, 1 hour) | SORT b" \
+    "FROM ${T} | STATS c = COUNT(*) BY b = BUCKET(@timestamp, 1 hour) | SORT b"
+
+  # Grouped COUNT BY DATE_TRUNC — same family, different function.
+  probe_gap "grouped COUNT BY DATE_TRUNC(1 hour, @timestamp)" \
+    "FROM ${D} | STATS c = COUNT(*) BY b = DATE_TRUNC(1 hour, @timestamp) | SORT b" \
+    "FROM ${T} | STATS c = COUNT(*) BY b = DATE_TRUNC(1 hour, @timestamp) | SORT b"
+
+  # Grouped COUNT BY a computed EVAL key (CONCAT) — computed grouping key not pushed.
+  probe_gap "grouped COUNT BY computed EVAL key (CONCAT)" \
+    "FROM ${D} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k" \
+    "FROM ${T} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k"
+
+  # Grouped metric aggregates (MIN/MAX/SUM/AVG) by keyword — only COUNT is pushed for grouped STATS today.
+  probe_gap "grouped MAX/MIN metric BY keyword" \
+    "FROM ${D} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS mx = MAX(\`event.duration\`), mn = MIN(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
 
   echo
-  log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (assertions)."
-  log "The grouped-by-function / multi-field rows above are informational: they exercise the known"
-  log "pushdown gaps and let you compare 'degrades/errors' today vs. correct totals after the fix."
+  log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (correctness assertions)."
+  log "GAP lines above are informational: 'GAP (open)' = pushdown not yet implemented (expected),"
+  log "'GAP CLOSED' = the connector now matches direct-remote and the probe should become an assertion."
 }
 
 # --------------------------------------------------------------------------------------------------
@@ -482,6 +651,7 @@ main() {
   start_remote_cluster
   create_remote_index
   ingest_synthetic_logs
+  build_local_distro
   start_primary_es
   bootstrap_encryption_key
   mint_remote_api_key
