@@ -400,22 +400,7 @@ class ElasticsearchConnector implements Connector {
                 blocks[out++] = decodeColumnByName(grouping.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
             }
             for (RemoteAggregate aggregate : aggregates) {
-                Integer index = columnIndexByName.get(aggregate.outputName());
-                if (index == null) {
-                    throw new IllegalStateException("Remote ES|QL response is missing expected column [" + aggregate.outputName() + "]");
-                }
-                List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
-                out = appendIntermediateChannels(
-                    blocks,
-                    out,
-                    aggregate,
-                    columnIndexByName,
-                    columns,
-                    columnValues,
-                    values,
-                    rowCount,
-                    blockFactory
-                );
+                out = appendIntermediateChannels(blocks, out, aggregate, columnIndexByName, columns, columnValues, rowCount, blockFactory);
             }
             success = true;
         } finally {
@@ -439,10 +424,15 @@ class ElasticsearchConnector implements Connector {
         Map<String, Integer> columnIndexByName,
         List<EsqlTypeMapping.RemoteColumn> columns,
         List<List<Object>> columnValues,
-        List<Object> values,
         int rowCount,
         BlockFactory blockFactory
     ) {
+        Integer index = columnIndexByName.get(aggregate.outputName());
+        if (index == null) {
+            throw new IllegalStateException("Remote ES|QL response is missing expected column [" + aggregate.outputName() + "]");
+        }
+        // The aggregate's own column drives both its VALUE block (decoded by type) and its SEEN marker (nullness).
+        List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
         for (RemoteAggregateState.Channel channel : intermediateState(aggregate).channels()) {
             blocks[out++] = switch (channel.role()) {
                 case VALUE -> decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
