@@ -106,8 +106,8 @@ final class EsqlTypeMapping {
             case UNSUPPORTED, NULL -> blockFactory.newConstantNullBlock(rowCount);
             // Spatial types and unsigned_long are valid remote column types but not yet decoded here;
             // surface as null so queries that project these columns don't throw at runtime.
-            case UNSIGNED_LONG, GEO_POINT, GEO_SHAPE, CARTESIAN_POINT, CARTESIAN_SHAPE,
-                GEOHEX, GEOHASH, GEOTILE -> blockFactory.newConstantNullBlock(rowCount);
+            case UNSIGNED_LONG, GEO_POINT, GEO_SHAPE, CARTESIAN_POINT, CARTESIAN_SHAPE, GEOHEX, GEOHASH, GEOTILE -> blockFactory
+                .newConstantNullBlock(rowCount);
             default -> throw new IllegalArgumentException(
                 "Unsupported remote Elasticsearch column type for value decoding: " + dataType.typeName()
             );

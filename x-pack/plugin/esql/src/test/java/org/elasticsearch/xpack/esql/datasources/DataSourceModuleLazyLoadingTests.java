@@ -226,7 +226,8 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
             Settings.EMPTY,
             blockFactory,
             EsExecutors.DIRECT_EXECUTOR_SERVICE,
-            new DataSourceCredentials()
+            new DataSourceCredentials(),
+            () -> false
         );
 
         ExternalSourceFactory factory = module.sourceFactories().get("rec");

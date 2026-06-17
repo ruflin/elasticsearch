@@ -296,6 +296,79 @@ public class ElasticsearchExternalSourceLiveIT extends AbstractElasticsearchLive
         return counts;
     }
 
+    // -------------------------------------------------------------------------------------------------------------
+    // Kibana KI / SigEvents query shapes (streams plugin, sig_events). These exercise the canonical queries the
+    // Knowledge-Indicator extraction / rule generation / Significant-Events features run against a stream, and
+    // compare the connector result to the same query run directly against the remote. They currently document
+    // gaps: the time-bucket / per-aggregate-filter / EVAL stages are NOT pushed, so they run locally over the
+    // connector's implicitly-capped first page and disagree with the direct full-dataset result. Each test will
+    // start passing once the corresponding pushdown gap is closed. They only run when a remote is configured.
+    // -------------------------------------------------------------------------------------------------------------
+
+    /**
+     * SigEvents histogram core: {@code STATS COUNT(*) BY BUCKET(@timestamp, 1 hour)} (count-over-time). The grouping
+     * key is a {@code BUCKET(...)} function, which {@link org.elasticsearch.xpack.esql.optimizer.rules.physical.local
+     * .PushConnectorStatsToExternalSource} does not push (it requires plain-attribute groupings), so the aggregate
+     * runs locally over the connector's capped page. The connector per-bucket counts must equal the direct
+     * full-dataset per-bucket counts.
+     */
+    public void testTimeBucketHistogramCountMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        String stats = " | STATS c = COUNT(*) BY bucket = BUCKET(@timestamp, 1 hour)";
+
+        Map<String, Long> direct = countsByKey(directValues("FROM " + TARGET + stats));
+        Map<String, Long> viaConnector = countsByKey(runExternal(externalSource() + stats));
+
+        assertThat("the histogram has several time buckets", direct.size(), greaterThan(1));
+        assertThat("connector time-bucket counts match the direct full-dataset histogram", viaConnector, equalTo(direct));
+    }
+
+    /**
+     * SigEvents error-rate core: a multi-aggregate STATS with per-aggregate filters and a post-STATS EVAL/WHERE
+     * (the {@code errors = COUNT(*) WHERE <pred>, total = COUNT(*) | EVAL rate = errors*100.0/total} shape). The
+     * per-aggregate {@code WHERE} (a filtered aggregate) is not pushed (see {@code toRemoteAggregate}, which bails on
+     * {@code fn.hasFilter()}), so the whole STATS falls back to local execution over the capped page. The connector
+     * total must equal the direct full-dataset total.
+     */
+    public void testFilteredAggregateCountMatchesDirect() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        // A per-aggregate filtered COUNT over a field that exists on logs*. The exact predicate is data-independent
+        // for the assertion: both paths apply the same filter, so the totals must match if pushdown is correct.
+        String stats = " | STATS errors = COUNT(*) WHERE message IS NOT NULL, total = COUNT(*)";
+
+        long directErrors = ((Number) directValues("FROM " + TARGET + stats).get(0).get(0)).longValue();
+        long viaErrors = ((Number) runExternal(externalSource() + stats).get(0).get(0)).longValue();
+
+        assertThat("there are enough rows that the cap would distort a local-only count", directErrors, greaterThan(10_000L));
+        assertThat("connector filtered-aggregate count matches the direct full-dataset count", viaErrors, equalTo(directErrors));
+    }
+
+    /**
+     * KI {@code match}-rule core: {@code FROM <target> METADATA _id, _source | LIMIT n}, reading back {@code _id}
+     * and {@code _source}. The connector does not render a {@code METADATA} option and cannot decode a {@code _source}
+     * object column, so this currently cannot return usable documents. When supported, the connector must return
+     * {@code n} rows each carrying a non-null {@code _id} and a non-null (object) {@code _source}.
+     */
+    public void testMetadataIdAndSourceRead() throws Exception {
+        assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+
+        int limit = 10;
+        String tail = " METADATA _id, _source | KEEP _id, _source | LIMIT " + limit;
+        List<List<Object>> rows = runExternal(externalSource() + tail);
+
+        assertThat(rows.size(), equalTo(limit));
+        for (List<Object> row : rows) {
+            assertThat("row carries _id and _source", row.size(), equalTo(2));
+            assertThat("_id is present", row.get(0), notNullValue());
+            assertThat("_source is present", row.get(1), notNullValue());
+        }
+    }
+
     private List<List<Object>> runExternal(String query) {
         try (var response = run(syncEsqlQueryRequest(query))) {
             return collectRows(response);

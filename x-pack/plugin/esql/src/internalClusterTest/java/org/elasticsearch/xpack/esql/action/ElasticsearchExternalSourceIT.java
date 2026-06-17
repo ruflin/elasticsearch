@@ -153,10 +153,8 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
             assertThat(response.getDataSources().size(), equalTo(1));
             assertThat(response.getDataSources().iterator().next().type(), equalTo("elasticsearch"));
         } finally {
-            client().execute(
-                DeleteDataSourceAction.INSTANCE,
-                new DeleteDataSourceAction.Request(timeout, timeout, new String[] { name })
-            ).actionGet(timeout);
+            client().execute(DeleteDataSourceAction.INSTANCE, new DeleteDataSourceAction.Request(timeout, timeout, new String[] { name }))
+                .actionGet(timeout);
         }
     }
 

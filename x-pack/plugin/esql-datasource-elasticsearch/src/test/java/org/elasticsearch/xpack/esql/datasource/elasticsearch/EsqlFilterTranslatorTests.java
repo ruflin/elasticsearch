@@ -158,4 +158,52 @@ public class EsqlFilterTranslatorTests extends ESTestCase {
         assertFalse(result.hasPushedFilter());
         assertEquals(List.of(remainder), result.remainder());
     }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Gaps relevant to the Kibana KI / SigEvents query shapes (Kibana streams plugin, sig_events). These assert
+    // current (v1) behaviour so the gaps are documented; closing a gap means flipping the corresponding assertion.
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * SigEvents/KI builds time-range predicates as {@code @timestamp >= TO_DATETIME("...")} (Kibana
+     * {@code latest_source_query.ts#applyTimeRange}). The right operand is a function call, not a {@link Literal},
+     * so the comparison is not pushed and stays in the local FilterExec — the remote returns its full (implicitly
+     * capped) page and the range is applied locally over only that page. This is a correctness/cost gap for any
+     * time-bounded read against the connector.
+     */
+    public void testTimeRangeAgainstFunctionValueIsNotPushed() {
+        // Stand-in for `@timestamp >= TO_DATETIME(<param>)`: the value side is a non-foldable reference, mirroring
+        // a function/parameter the translator cannot render as a literal.
+        Expression rhs = field("computed_ts", DataType.DATETIME);
+        Expression expr = new GreaterThan(Source.EMPTY, field("@timestamp", DataType.DATETIME), rhs, null);
+        assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(expr)));
+        assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(expr));
+    }
+
+    /**
+     * A datetime literal comparison ({@code @timestamp <= <datetime literal>}) is also not pushed: the literal
+     * renderer only handles keyword/text/boolean/int/long/double, so DATETIME literals fall through to "not
+     * pushable". KI/SigEvents time bounds therefore never reach the remote regardless of how they are expressed.
+     */
+    public void testDatetimeLiteralComparisonIsNotPushed() {
+        Literal datetimeLit = new Literal(Source.EMPTY, 1_700_000_000_000L, DataType.DATETIME);
+        Expression expr = new LessThanOrEqual(Source.EMPTY, field("@timestamp", DataType.DATETIME), datetimeLit, null);
+        assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(expr)));
+        assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(expr));
+    }
+
+    /**
+     * The KI dedup / lookup path filters with {@code <field> IN (...)} (Kibana {@code latest_source_query.ts#inFilter},
+     * e.g. {@code _id IN (...)}). The translator only handles {@code == != < <= > >=} comparisons plus AND/OR/NOT,
+     * so an {@code IN} list is not pushed and is applied locally over the connector's capped page.
+     */
+    public void testInListIsNotPushed() {
+        Expression in = new org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.In(
+            Source.EMPTY,
+            field("status", DataType.KEYWORD),
+            List.of(kw("active"), kw("error"))
+        );
+        assertEquals(Optional.empty(), EsqlFilterTranslator.toWhereClause(List.of(in)));
+        assertEquals(FilterPushdownSupport.Pushability.NO, EsqlFilterTranslator.INSTANCE.canPush(in));
+    }
 }

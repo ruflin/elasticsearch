@@ -102,7 +102,7 @@ public class ElasticsearchNamedDataSourceLiveIT extends AbstractElasticsearchLiv
         }
     }
 
-    private static void safeDelete(Runnable delete) {
+    private void safeDelete(Runnable delete) {
         try {
             delete.run();
         } catch (Exception e) {
