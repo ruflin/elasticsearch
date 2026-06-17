@@ -164,6 +164,21 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         assertThat(query, equalTo("FROM logs | STATS `s` = SUM(`event.duration`) BY `service.name`"));
     }
 
+    public void testWrappedFieldSumRenders() {
+        // SUM(TO_DOUBLE(event.duration)) from AVG-over-long's surrogate: the connector wraps the quoted field in the
+        // scalar function name, keeping identifier quoting on its side.
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(RemoteAggregate.ofWrappedField("s", "SUM", "TO_DOUBLE", "event.duration", null, null)),
+                List.of(RemoteGrouping.ofField("service.name"))
+            )
+        );
+        assertThat(query, equalTo("FROM logs | STATS `s` = SUM(TO_DOUBLE(`event.duration`)) BY `service.name`"));
+    }
+
     public void testMatchStyleProjectedReadRenders() {
         // The non-aggregated leg of a match-style read: project a couple of fields with a SORT + LIMIT. Note this
         // is only what the connector CAN render; the KI match shape additionally needs METADATA _id, _source and

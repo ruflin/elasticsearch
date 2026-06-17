@@ -29,6 +29,7 @@ import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
+import org.elasticsearch.xpack.esql.expression.function.scalar.convert.ToDouble;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.Equals;
 import org.elasticsearch.xpack.esql.optimizer.ExternalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
@@ -451,6 +452,48 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         List<RemoteAggregateState.Channel> channels = remote.intermediateState().channels();
         assertEquals(RemoteAggregateState.Role.VALUE, channels.get(0).role());
         // The last channel is the seen marker regardless of how many auxiliary channels precede it.
+        assertEquals(RemoteAggregateState.Role.SEEN, channels.get(channels.size() - 1).role());
+    }
+
+    public void testSumOverEvalToDoublePushedAsWrappedField() {
+        // AVG(metric_l) surrogates to SUM(TO_DOUBLE(metric_l))/COUNT(metric_l), and
+        // ReplaceAggregateNestedExpressionWithEval extracts TO_DOUBLE(metric_l) into an Eval the SUM then references.
+        // The rule looks through that Eval and pushes the SUM as a TO_DOUBLE-wrapped field (not raw source text,
+        // which the synthesized ToDouble does not carry faithfully), removing the Eval.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute toDbl = referenceAttribute("$$metric_l$converted", DataType.DOUBLE);
+        EvalExec eval = new EvalExec(
+            Source.EMPTY,
+            ext,
+            List.of(new Alias(Source.EMPTY, "$$metric_l$converted", new ToDouble(Source.EMPTY, METRIC_LONG)))
+        );
+        List<Attribute> intermediate = List.of(
+            referenceAttribute("s", DataType.DOUBLE),
+            referenceAttribute("s$delta", DataType.DOUBLE),
+            referenceAttribute("s$seen", DataType.BOOLEAN)
+        );
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            eval,
+            List.of(),
+            List.of(alias("s", new Sum(Source.EMPTY, toDbl))),
+            AggregatorMode.INITIAL,
+            intermediate,
+            null
+        );
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        // The Eval is removed and the SUM is pushed as SUM(TO_DOUBLE(metric_l)).
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        RemoteAggregate remote = ((ExternalSourceExec) result).pushedAggregates().get(0);
+        assertEquals("SUM", remote.function());
+        assertEquals("metric_l", remote.field());
+        assertEquals("TO_DOUBLE", remote.fieldFunction());
+        assertNotNull(remote.intermediateState());
+        // SUM-double layout: [value, delta, seen].
+        List<RemoteAggregateState.Channel> channels = remote.intermediateState().channels();
+        assertEquals(RemoteAggregateState.Role.VALUE, channels.get(0).role());
         assertEquals(RemoteAggregateState.Role.SEEN, channels.get(channels.size() - 1).role());
     }
 

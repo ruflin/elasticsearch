@@ -713,21 +713,23 @@ run_verification_suite() {
     "FROM ${D} | STATS a = AVG(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`" \
     "FROM ${T} | STATS a = AVG(\`metric.value\`) BY \`service.name\` | SORT \`service.name\`"
 
-  log "-- Known pushdown gaps (probes; non-fatal) -------------------"
-  # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
-  # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
-
-  # AVG over a long input surrogates to SUM(TO_DOUBLE(duration))/COUNT, whose SUM input is a computed expression
-  # (not a plain source attribute) and so is not pushed; the STATS falls back to local execution. It still must be
-  # numerically correct, so we probe it: a mismatch here would indicate a paging/local-fallback correctness bug.
-  probe_gap "grouped AVG(long) metric BY keyword (local fallback)" \
+  # 26. (AVG) Grouped AVG over a long metric. AVG-over-long surrogates to SUM(TO_DOUBLE(duration))/COUNT, and the
+  # ReplaceAggregateNestedExpressionWithEval rule extracts TO_DOUBLE(duration) into an Eval. The pushdown rule looks
+  # through that Eval and pushes SUM(TO_DOUBLE(`event.duration`)) (plus COUNT), so the result must match
+  # direct-remote rather than degrade to a locally-paged STATS.
+  assert_match "grouped AVG(long) metric BY keyword" \
     "FROM ${D} | STATS a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`" \
     "FROM ${T} | STATS a = AVG(\`event.duration\`) BY \`service.name\` | SORT \`service.name\`"
 
+  # 27. (AVG) Ungrouped AVG over the long metric stream.
+  assert_match "ungrouped AVG(long) metric" \
+    "FROM ${D} | STATS a = AVG(\`event.duration\`)" \
+    "FROM ${T} | STATS a = AVG(\`event.duration\`)"
+
   echo
   log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (correctness assertions)."
-  log "GAP lines above are informational: 'GAP (open)' = pushdown not yet implemented (expected),"
-  log "'GAP CLOSED' = the connector now matches direct-remote and the probe should become an assertion."
+  log "No open pushdown gaps remain. The probe_gap helper is kept for future pushdown work: a 'GAP (open)'"
+  log "line marks an unimplemented pushdown, and 'GAP CLOSED' signals a probe ready to become an assertion."
 }
 
 # --------------------------------------------------------------------------------------------------
