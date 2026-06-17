@@ -388,7 +388,7 @@ class ElasticsearchConnector implements Connector {
         List<RemoteAggregate> aggregates = request.pushedAggregates();
         int aggregateBlocks = 0;
         for (RemoteAggregate aggregate : aggregates) {
-            aggregateBlocks += aggregate.intermediateState() == null ? 2 : aggregate.intermediateState().channels().size();
+            aggregateBlocks += intermediateState(aggregate).channels().size();
         }
         Block[] blocks = new Block[groupings.size() + aggregateBlocks];
         boolean success = false;
@@ -427,8 +427,10 @@ class ElasticsearchConnector implements Connector {
     }
 
     /**
-     * Appends the intermediate-state blocks for one aggregate, returning the next output index. Uses the aggregate's
-     * {@link RemoteAggregateState} recipe, or the legacy {@code [value, seen]} layout when no recipe is present.
+     * Appends the intermediate-state blocks for one aggregate, returning the next output index. Every channel is
+     * driven by the aggregate's {@link RemoteAggregateState} recipe: the primary {@code VALUE} channel is decoded
+     * from the remote column, the {@code SEEN} channel is derived from value nullness (so a null per-group result is
+     * skipped by the FINAL merge), and any auxiliary {@code NEUTRAL} channel is filled with its identity value.
      */
     private static int appendIntermediateChannels(
         Block[] blocks,
@@ -441,15 +443,7 @@ class ElasticsearchConnector implements Connector {
         int rowCount,
         BlockFactory blockFactory
     ) {
-        RemoteAggregateState state = aggregate.intermediateState();
-        if (state == null) {
-            // Legacy [value, seen]: COUNT / MIN / MAX. The seen marker reflects per-row presence so a null grouped
-            // MIN/MAX is skipped by the FINAL merge; COUNT is always dense, so deriving seen from nullness is a no-op.
-            blocks[out++] = decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
-            blocks[out++] = buildSeenBlock(values, rowCount, blockFactory);
-            return out;
-        }
-        for (RemoteAggregateState.Channel channel : state.channels()) {
+        for (RemoteAggregateState.Channel channel : intermediateState(aggregate).channels()) {
             blocks[out++] = switch (channel.role()) {
                 case VALUE -> decodeColumnByName(aggregate.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
                 case SEEN -> buildSeenBlock(values, rowCount, blockFactory);
@@ -457,6 +451,19 @@ class ElasticsearchConnector implements Connector {
             };
         }
         return out;
+    }
+
+    /**
+     * The intermediate-state recipe for a pushed aggregate. The optimizer always attaches one (see
+     * {@code PushConnectorStatsToExternalSource}); a missing recipe means a connector was asked to emit partial
+     * state without the layout the FINAL merge expects, which is a planning bug rather than a runtime condition.
+     */
+    private static RemoteAggregateState intermediateState(RemoteAggregate aggregate) {
+        RemoteAggregateState state = aggregate.intermediateState();
+        if (state == null) {
+            throw new IllegalStateException("Pushed aggregate [" + aggregate.outputName() + "] is missing its intermediate-state recipe");
+        }
+        return state;
     }
 
     /**

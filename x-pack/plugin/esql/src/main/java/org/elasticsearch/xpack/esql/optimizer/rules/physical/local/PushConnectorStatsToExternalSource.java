@@ -212,10 +212,11 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
      * Projects a supported aggregate function to its {@link RemoteAggregate}, or {@code null} when the function is
      * outside this step's scope (which leaves the plan untouched).
      *
-     * <p>COUNT, MIN and MAX use the two-channel {@code [value, seen]} layout and carry no explicit recipe (the
-     * connector falls back to it). SUM carries an explicit {@link RemoteAggregateState} recipe because its layout is
-     * type-dependent (SUM-double adds a Kahan {@code delta}, SUM-long may add an overflow {@code failed} channel).
-     * AVG is a surrogate over SUM+COUNT and is rewritten before the physical plan, so it never reaches this rule.
+     * <p>Every aggregate carries an explicit {@link RemoteAggregateState} recipe derived from its function's
+     * intermediate-state descriptor: COUNT/MIN/MAX resolve to the two-channel {@code [value, seen]} layout, while
+     * SUM is type-dependent (SUM-double adds a Kahan {@code delta}, SUM-long may add an overflow {@code failed}
+     * channel). AVG is a surrogate over SUM+COUNT and is rewritten before the physical plan, so it never reaches
+     * this rule.
      *
      * <p>A per-aggregate filter ({@code COUNT(*) WHERE <pred>}) is forwarded by rendering the predicate's source
      * text; it is pushed only when {@code <pred>} references plain source columns (in {@code sourceFieldNames}) the
@@ -234,24 +235,24 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             // A filter is present but cannot be safely forwarded; leave the whole aggregate to local execution.
             return null;
         }
+        RemoteAggregateState state = intermediateState(fn, grouped);
         if (fn instanceof Count count) {
             Expression field = count.field();
             if (field.foldable()) {
                 // COUNT(*) / COUNT(<literal>): no input field.
-                return new RemoteAggregate(outputName, "COUNT", null, filter);
+                return new RemoteAggregate(outputName, "COUNT", null, filter, state);
             }
-            return field instanceof Attribute attr ? new RemoteAggregate(outputName, "COUNT", attr.name(), filter) : null;
+            return field instanceof Attribute attr ? new RemoteAggregate(outputName, "COUNT", attr.name(), filter, state) : null;
         }
         if (fn instanceof Min min) {
-            return fieldAggregate(outputName, "MIN", min.field(), filter);
+            return fieldAggregate(outputName, "MIN", min.field(), filter, state);
         }
         if (fn instanceof Max max) {
-            return fieldAggregate(outputName, "MAX", max.field(), filter);
+            return fieldAggregate(outputName, "MAX", max.field(), filter, state);
         }
         if (fn instanceof Sum sum) {
-            // SUM needs an explicit intermediate-state recipe (delta / failed channels). A windowed SUM has a
-            // different intermediate layout this recipe does not capture, so only push the non-windowed form. (A
-            // per-aggregate filter is handled separately above and is compatible.)
+            // A windowed SUM has a different intermediate layout this recipe does not capture, so only push the
+            // non-windowed form. (A per-aggregate filter is handled separately above and is compatible.)
             if (AggregateFunction.NO_WINDOW.equals(sum.window()) == false) {
                 return null;
             }
@@ -262,14 +263,14 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
                 // otherwise it is a plain source column rendered as a quoted identifier.
                 Alias evalField = evalFields.get(attr.name());
                 if (evalField != null) {
-                    RemoteAggregate remote = wrappedSumFromEvalInput(outputName, fn, grouped, filter, evalField.child(), sourceFieldNames);
+                    RemoteAggregate remote = wrappedSumFromEvalInput(outputName, filter, state, evalField.child(), sourceFieldNames);
                     if (remote == null) {
                         return null;
                     }
                     consumedEvalFields.add(attr.name());
                     return remote;
                 }
-                return new RemoteAggregate(outputName, "SUM", attr.name(), filter, intermediateState(fn, grouped));
+                return new RemoteAggregate(outputName, "SUM", attr.name(), filter, state);
             }
             return null;
         }
@@ -289,19 +290,18 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
      */
     private static RemoteAggregate wrappedSumFromEvalInput(
         String outputName,
-        AggregateFunction fn,
-        boolean grouped,
         String filter,
+        RemoteAggregateState state,
         Expression evalInput,
         Set<String> sourceFieldNames
     ) {
         if (evalInput instanceof ToDouble toDouble
             && toDouble.field() instanceof Attribute attr
             && sourceFieldNames.contains(attr.name())) {
-            return RemoteAggregate.ofWrappedField(outputName, "SUM", "TO_DOUBLE", attr.name(), filter, intermediateState(fn, grouped));
+            return RemoteAggregate.ofWrappedField(outputName, "SUM", "TO_DOUBLE", attr.name(), filter, state);
         }
         if (evalInput instanceof Attribute attr && sourceFieldNames.contains(attr.name())) {
-            return new RemoteAggregate(outputName, "SUM", attr.name(), filter, intermediateState(fn, grouped));
+            return new RemoteAggregate(outputName, "SUM", attr.name(), filter, state);
         }
         return null;
     }
@@ -376,8 +376,14 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
     }
 
     /** Builds a {@link RemoteAggregate} for a single-field aggregate, or {@code null} when the input is not a plain attribute. */
-    private static RemoteAggregate fieldAggregate(String outputName, String function, Expression field, String filter) {
-        return field instanceof Attribute attr ? new RemoteAggregate(outputName, function, attr.name(), filter) : null;
+    private static RemoteAggregate fieldAggregate(
+        String outputName,
+        String function,
+        Expression field,
+        String filter,
+        RemoteAggregateState state
+    ) {
+        return field instanceof Attribute attr ? new RemoteAggregate(outputName, function, attr.name(), filter, state) : null;
     }
 
     private static boolean aggregatePushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {
