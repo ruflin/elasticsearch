@@ -217,7 +217,8 @@ create_remote_index() {
             \"log.level\":                  { \"type\": \"keyword\" },
             \"http.response.status_code\":  { \"type\": \"long\" },
             \"event.duration\":             { \"type\": \"long\" },
-            \"metric.value\":               { \"type\": \"double\" }
+            \"metric.value\":               { \"type\": \"double\" },
+            \"metric.optional\":            { \"type\": \"double\" }
           }
         }
       }
@@ -245,18 +246,26 @@ ingest_synthetic_logs() {
         split("200,201,400,404,500,503", codes, ",");
         for (i = 0; i < n; i++) {
           g = start + i;
+          # Use distinct strides per field so dimensions are not perfectly correlated (e.g. service.name and
+          # data_stream.dataset do not move together), giving grouped aggregations a more realistic key spread.
           ds = datasets[(g % 5) + 1];
-          host = hosts[(g % 4) + 1];
-          svc = services[(g % 5) + 1];
+          host = hosts[((int(g / 5)) % 4) + 1];
+          svc = services[((int(g / 2)) % 5) + 1];
           lvl = levels[(g % 4) + 1];
-          code = codes[(g % 6) + 1];
+          code = codes[((int(g / 3)) % 6) + 1];
           # Spread timestamps over the last ~12h so BUCKET / DATE_TRUNC produce several buckets.
           ts = now - ((g % 720) * 60000);
           dur = ((g * 37) % 5000) + 1;
           # A genuine double metric (fractional) so SUM/AVG exercise the double intermediate layout [value, delta, seen].
           mval = (((g * 37) % 5000) + 1) / 7.0;
           printf "{\"create\":{}}\n";
-          printf "{\"@timestamp\":%d,\"message\":\"request %d on %s\",\"data_stream.dataset\":\"%s\",\"host.name\":\"%s\",\"service.name\":\"%s\",\"log.level\":\"%s\",\"http.response.status_code\":%s,\"event.duration\":%d,\"metric.value\":%.6f}\n", ts, g, svc, ds, host, svc, lvl, code, dur, mval;
+          # metric.optional is intentionally OMITTED (null) for 1 in 3 docs. A whole group can then be entirely
+          # null (e.g. when grouping by a key that aligns with the null pattern), which exercises the
+          # seen-from-nullness path: a grouped SUM/MIN/MAX over a null group must be skipped by the FINAL merge,
+          # not merged as 0 / a real value. Without any nulls that code path is never actually verified.
+          opt = "";
+          if (g % 3 != 0) { opt = sprintf(",\"metric.optional\":%.6f", mval); }
+          printf "{\"@timestamp\":%d,\"message\":\"request %d on %s\",\"data_stream.dataset\":\"%s\",\"host.name\":\"%s\",\"service.name\":\"%s\",\"log.level\":\"%s\",\"http.response.status_code\":%s,\"event.duration\":%d,\"metric.value\":%.6f%s}\n", ts, g, svc, ds, host, svc, lvl, code, dur, mval, opt;
         }
       }
     ' > /tmp/esql-2c-bulk.ndjson
@@ -490,6 +499,11 @@ remote_json() {
 # compared regardless of column-order/whitespace noise: emit one canonical line per row, rows sorted.
 # Uses awk only (no jq/node dependency, matching the rest of the script). It strips everything up to
 # "values":, then splits the array into rows on "],[" and prints each row trimmed, finally `sort`s them.
+#
+# LIMITATION: row splitting is purely textual on "],[", so a cell value that itself contains "],[" (most
+# plausibly a `_source` JSON string from the METADATA _source decode) would be split mid-cell and compared
+# incorrectly. Keep assert_match queries to scalar/keyword/numeric columns; verify _source reads with
+# assert_row_count (which only counts rows) rather than assert_match.
 normalize_values() {
   awk '
     {
@@ -725,6 +739,34 @@ run_verification_suite() {
   assert_match "ungrouped AVG(long) metric" \
     "FROM ${D} | STATS a = AVG(\`event.duration\`)" \
     "FROM ${T} | STATS a = AVG(\`event.duration\`)"
+
+  # --- seen-from-nullness path: metric.optional is null for 1 in 3 docs ----------------------------------------
+  # These exercise the SEEN channel the connector derives from value nullness. A grouped aggregate over a field
+  # that is null for part (or all) of a group must merge identically to direct-remote: the FINAL merge skips
+  # null partials rather than counting them as a real value or 0. Without nulls in the data these would pass even
+  # if the SEEN logic were broken, so they are the only real coverage of that path.
+
+  # 28. Grouped SUM over a partially-null metric.
+  assert_match "grouped SUM(nullable double) BY keyword" \
+    "FROM ${D} | STATS s = SUM(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS s = SUM(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 29. Grouped MIN/MAX over a partially-null metric (the original motivation for deriving seen from nullness).
+  assert_match "grouped MAX/MIN(nullable double) BY keyword" \
+    "FROM ${D} | STATS mx = MAX(\`metric.optional\`), mn = MIN(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS mx = MAX(\`metric.optional\`), mn = MIN(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 30. Grouped AVG over a partially-null metric: COUNT must count only non-null inputs, so the merged average
+  # equals direct-remote only when the seen marker correctly excludes null partials.
+  assert_match "grouped AVG(nullable double) BY keyword" \
+    "FROM ${D} | STATS a = AVG(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS a = AVG(\`metric.optional\`) BY \`service.name\` | SORT \`service.name\`"
+
+  # 31. Empty-result aggregate: a filter that matches no rows must produce the same (null) partial as direct-remote,
+  # proving an entirely-empty remote STATS merges correctly rather than erroring or fabricating a row.
+  assert_match "grouped SUM over empty match set" \
+    "FROM ${D} | WHERE \`log.level\` == \"NONEXISTENT\" | STATS s = SUM(\`metric.value\`) BY \`service.name\`" \
+    "FROM ${T} | WHERE \`log.level\` == \"NONEXISTENT\" | STATS s = SUM(\`metric.value\`) BY \`service.name\`"
 
   echo
   log "Verification suite finished: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (correctness assertions)."
