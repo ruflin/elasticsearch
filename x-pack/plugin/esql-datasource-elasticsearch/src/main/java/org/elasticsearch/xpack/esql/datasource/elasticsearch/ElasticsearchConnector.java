@@ -381,8 +381,16 @@ class ElasticsearchConnector implements Connector {
             for (RemoteGrouping grouping : groupings) {
                 blocks[out++] = decodeColumnByName(grouping.outputName(), columnIndexByName, columns, columnValues, rowCount, blockFactory);
             }
-            // Each aggregate becomes a (value, seen=true) pair.
+            // Each aggregate becomes a (value, seen) pair. The seen marker must reflect per-row presence: a grouped
+            // MIN/MAX is null for a group whose values are all null, and a null value with seen=true would be merged
+            // by the FINAL aggregate as a real result. COUNT is always a dense non-null long (seen is always true),
+            // but deriving seen from the value's nullness is correct for COUNT too, so it is applied uniformly.
             for (RemoteAggregate aggregate : aggregates) {
+                Integer index = columnIndexByName.get(aggregate.outputName());
+                if (index == null) {
+                    throw new IllegalStateException("Remote ES|QL response is missing expected column [" + aggregate.outputName() + "]");
+                }
+                List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
                 blocks[out++] = decodeColumnByName(
                     aggregate.outputName(),
                     columnIndexByName,
@@ -391,7 +399,7 @@ class ElasticsearchConnector implements Connector {
                     rowCount,
                     blockFactory
                 );
-                blocks[out++] = blockFactory.newConstantBooleanBlockWith(true, rowCount);
+                blocks[out++] = buildSeenBlock(values, rowCount, blockFactory);
             }
             success = true;
         } finally {
@@ -417,6 +425,21 @@ class ElasticsearchConnector implements Connector {
         DataType type = DataType.fromNameOrAlias(columns.get(index).type());
         List<Object> values = index < columnValues.size() ? columnValues.get(index) : List.of();
         return EsqlTypeMapping.toBlock(type, values, rowCount, blockFactory);
+    }
+
+    /**
+     * Builds the {@code seen} marker block for an aggregate's intermediate state: {@code seen[i] = value[i] != null}.
+     * The FINAL aggregator skips rows whose marker is false, so a per-row marker keeps a null group result (e.g. a
+     * group whose MIN/MAX inputs are all null) from being merged as a real value. A missing value list defaults to
+     * all-false, matching an empty remote result.
+     */
+    private static Block buildSeenBlock(List<Object> values, int rowCount, BlockFactory blockFactory) {
+        try (var builder = blockFactory.newBooleanBlockBuilder(rowCount)) {
+            for (int i = 0; i < rowCount; i++) {
+                builder.appendBoolean(i < values.size() && values.get(i) != null);
+            }
+            return builder.build();
+        }
     }
 
     /**

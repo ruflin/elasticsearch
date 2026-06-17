@@ -219,18 +219,74 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertEquals(intermediate, resultExt.output());
     }
 
-    public void testNotPushedForGroupedMinMax() {
-        // STATS m = MAX(message) BY level: grouped MIN/MAX would need a dense per-group value channel with the seen
-        // marker carrying presence; the connector cannot represent a null per-group MIN/MAX, so it stays local.
+    public void testGroupedMaxPushed() {
+        // STATS m = MAX(message) BY level: grouped MIN/MAX is now pushed. The connector derives the seen marker from
+        // each value's nullness, so a group whose MAX is null is skipped by the FINAL merge rather than counted.
         ExternalSourceExec ext = connectorSource();
         ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        List<Attribute> intermediate = List.of(
+            level,
+            referenceAttribute("m", DataType.KEYWORD),
+            referenceAttribute("m$seen", DataType.BOOLEAN)
+        );
         AggregateExec agg = new AggregateExec(
             Source.EMPTY,
             ext,
             List.of(level),
             List.of(alias("m", new Max(Source.EMPTY, MESSAGE)), level),
             AggregatorMode.INITIAL,
-            List.of(level, referenceAttribute("m", DataType.KEYWORD), referenceAttribute("m$seen", DataType.BOOLEAN)),
+            intermediate,
+            null
+        );
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        ExternalSourceExec resultExt = (ExternalSourceExec) result;
+        assertEquals(List.of(RemoteGrouping.ofField("level")), resultExt.pushedGroupings());
+        assertEquals("MAX", resultExt.pushedAggregates().get(0).function());
+        assertEquals("message", resultExt.pushedAggregates().get(0).field());
+        assertTrue(resultExt.pushedAggregateIntermediate());
+        assertEquals(intermediate, resultExt.output());
+    }
+
+    public void testGroupedMinPushed() {
+        // STATS m = MIN(message) BY level: grouped MIN is pushed for the same reason as grouped MAX.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        List<Attribute> intermediate = List.of(
+            level,
+            referenceAttribute("m", DataType.KEYWORD),
+            referenceAttribute("m$seen", DataType.BOOLEAN)
+        );
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(level),
+            List.of(alias("m", new Min(Source.EMPTY, MESSAGE)), level),
+            AggregatorMode.INITIAL,
+            intermediate,
+            null
+        );
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        assertEquals("MIN", ((ExternalSourceExec) result).pushedAggregates().get(0).function());
+    }
+
+    public void testGroupedSumStillNotPushed() {
+        // STATS s = SUM(message) BY level: SUM has a multi-channel intermediate layout the connector does not yet
+        // emit, so the whole STATS stays local even though MIN/MAX are now pushable.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute level = referenceAttribute("level", DataType.KEYWORD);
+        AggregateExec agg = new AggregateExec(
+            Source.EMPTY,
+            ext,
+            List.of(level),
+            List.of(alias("s", new Sum(Source.EMPTY, MESSAGE)), level),
+            AggregatorMode.INITIAL,
+            List.of(level, referenceAttribute("s", DataType.DOUBLE), referenceAttribute("s$seen", DataType.BOOLEAN)),
             null
         );
         PhysicalPlan result = applyRule(agg, true);

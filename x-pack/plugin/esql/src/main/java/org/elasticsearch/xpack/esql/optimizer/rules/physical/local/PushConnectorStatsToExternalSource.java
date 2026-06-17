@@ -60,9 +60,11 @@ import java.util.Set;
  * {@code STATS}. It bails out when the source already carries a pushed sort or limit, which would change the row
  * set the remote aggregates over relative to what the surviving plan expects.
  *
- * <p>This step supports {@code COUNT(*)} / {@code COUNT(field)} with or without groupings, and ungrouped
- * {@code MIN(field)} / {@code MAX(field)}. Anything not yet supported leaves the plan untouched so the local
- * aggregate runs normally.
+ * <p>This step supports {@code COUNT(*)} / {@code COUNT(field)} and {@code MIN(field)} / {@code MAX(field)}, with
+ * or without groupings (the connector derives each aggregate's {@code seen} marker from value nullness, so a
+ * grouped MIN/MAX that is null for a group is correctly skipped by the FINAL merge). {@code SUM} / {@code AVG}
+ * have a different intermediate layout and are not yet supported. Anything not supported leaves the plan
+ * untouched so the local aggregate runs normally.
  */
 public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.ParameterizedOptimizerRule<
     AggregateExec,
@@ -146,17 +148,14 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         for (Attribute attr : ext.output()) {
             sourceFieldNames.add(attr.name());
         }
-        boolean grouped = groupings.isEmpty() == false;
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
         for (NamedExpression agg : aggregateExec.aggregates()) {
             if (agg instanceof Alias alias && alias.child() instanceof AggregateFunction fn) {
-                // Grouped MIN/MAX would need a dense (non-null) value channel per group with the seen marker
-                // carrying presence; the connector only emits seen=true with the remote value, which is unsafe when
-                // a group's MIN/MAX is null. COUNT is always a dense non-null long, so it is the only grouped
-                // aggregate supported here. Ungrouped MIN/MAX remain supported (single-row, non-grouping state).
-                if (grouped && fn instanceof Count == false) {
-                    return aggregateExec;
-                }
+                // COUNT/MIN/MAX share the two-channel [value, seen] intermediate layout and are supported both
+                // ungrouped and grouped: the connector now derives the seen marker from each value's nullness, so a
+                // grouped MIN/MAX that is null for a group (all inputs null) is correctly skipped by the FINAL
+                // merge. SUM/AVG have a different intermediate layout and return null from toRemoteAggregate below,
+                // leaving the whole STATS for local execution.
                 RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames);
                 if (remote == null) {
                     return aggregateExec;
