@@ -55,9 +55,9 @@ import java.util.Set;
  *   <li>{@code SINGLE}: the rule <b>removes</b> the aggregate and the source emits final values directly (output
  *       = the aggregate's final output).</li>
  *   <li>{@code INITIAL}: external-source STATS is planned as {@code FINAL(INITIAL(source))}. The rule replaces the
- *       {@code INITIAL} aggregate with the source and asks it to emit <b>intermediate</b> aggregator state
- *       ({@code [value, seen]} per aggregate, output = {@link AggregateExec#intermediateAttributes()}); the
- *       surviving {@code FINAL} aggregate merges that single partial into the correct final result.</li>
+ *       {@code INITIAL} aggregate with the source and asks it to emit <b>intermediate</b> aggregator state (output
+ *       = {@link AggregateExec#intermediateAttributes()}); the surviving {@code FINAL} aggregate merges that single
+ *       partial into the correct final result.</li>
  * </ul>
  * {@code FINAL} is never matched here because a FINAL aggregate's child is the INITIAL aggregate, not the source.
  *
@@ -65,11 +65,15 @@ import java.util.Set;
  * {@code STATS}. It bails out when the source already carries a pushed sort or limit, which would change the row
  * set the remote aggregates over relative to what the surviving plan expects.
  *
- * <p>This step supports {@code COUNT(*)} / {@code COUNT(field)} and {@code MIN(field)} / {@code MAX(field)}, with
- * or without groupings (the connector derives each aggregate's {@code seen} marker from value nullness, so a
- * grouped MIN/MAX that is null for a group is correctly skipped by the FINAL merge). {@code SUM} / {@code AVG}
- * have a different intermediate layout and are not yet supported. Anything not supported leaves the plan
- * untouched so the local aggregate runs normally.
+ * <p>Supported aggregates: {@code COUNT}, {@code MIN}, {@code MAX} and {@code SUM} (and therefore {@code AVG},
+ * which the analyzer rewrites to {@code SUM}/{@code COUNT} before the physical plan), grouped or ungrouped. Each
+ * aggregate forwards the intermediate-state layout the {@code FINAL} merge expects: COUNT/MIN/MAX use the implicit
+ * {@code [value, seen]} layout, while SUM carries an explicit {@link RemoteAggregateState} recipe (its layout is
+ * type-dependent). The connector derives each {@code seen} marker from value nullness, so a grouped aggregate that
+ * is null for a group is correctly skipped by the {@code FINAL} merge. A per-aggregate filter and a computed
+ * grouping/aggregate input (e.g. a time {@code BUCKET}, or the {@code TO_DOUBLE} AVG-over-long introduces) are
+ * pushed only when they reference plain source columns. Anything not supported leaves the plan untouched so the
+ * local aggregate runs normally.
  */
 public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.ParameterizedOptimizerRule<
     AggregateExec,
@@ -139,7 +143,7 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             String name = groupAttribute.name();
             Alias evalField = evalFields.get(name);
             if (evalField != null) {
-                String rendered = renderGroupingExpression(evalField, sourceFieldNames);
+                String rendered = renderOverSourceColumns(evalField.child(), sourceFieldNames);
                 if (rendered == null) {
                     // A computed grouping with no faithful source text (or referencing a non-source column) cannot be
                     // forwarded; leave the STATS local.
@@ -187,26 +191,6 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         // or its intermediate attributes for INITIAL (so the FINAL aggregate above consumes the right schema).
         List<Attribute> output = intermediate ? aggregateExec.intermediateAttributes() : aggregateExec.output();
         return ext.withPushedAggregate(remoteAggregates, remoteGroupings, output, intermediate);
-    }
-
-    /**
-     * Renders a looked-through Eval field used as a grouping key to its remote ES|QL source text (e.g.
-     * {@code BUCKET(@timestamp, 5 minutes)}), or {@code null} when it cannot be safely forwarded — its source text is
-     * unavailable (a synthesized expression), or it references anything other than source columns the remote knows
-     * under the same name. The source text of a parsed expression is valid remote ES|QL because the remote runs the
-     * same query language over the same field names.
-     */
-    private static String renderGroupingExpression(Alias evalField, Set<String> sourceFieldNames) {
-        String sourceText = evalField.child().sourceText();
-        if (sourceText == null || sourceText.isBlank()) {
-            return null;
-        }
-        for (Attribute referenced : evalField.child().references()) {
-            if (sourceFieldNames.contains(referenced.name()) == false) {
-                return null;
-            }
-        }
-        return sourceText;
     }
 
     /** Whether {@code agg} is a bare reference to one of the grouping keys (so the connector renders it via BY). */
@@ -369,12 +353,21 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         if (fn.hasFilter() == false) {
             return null;
         }
-        Expression filter = fn.filter();
-        String sourceText = filter.sourceText();
+        return renderOverSourceColumns(fn.filter(), sourceFieldNames);
+    }
+
+    /**
+     * Returns the source text of {@code expression} when it can be safely forwarded to the remote — its source text
+     * is present and it references only plain source columns the remote knows under the same name — or {@code null}
+     * otherwise. The source text of a parsed expression is valid remote ES|QL because the remote runs the same query
+     * language over the same field names. Shared by computed grouping keys and per-aggregate filters.
+     */
+    private static String renderOverSourceColumns(Expression expression, Set<String> sourceFieldNames) {
+        String sourceText = expression.sourceText();
         if (sourceText == null || sourceText.isBlank()) {
             return null;
         }
-        for (Attribute referenced : filter.references()) {
+        for (Attribute referenced : expression.references()) {
             if (sourceFieldNames.contains(referenced.name()) == false) {
                 return null;
             }
