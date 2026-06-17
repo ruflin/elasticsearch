@@ -626,24 +626,26 @@ run_verification_suite() {
   assert_row_count "METADATA _id, _source read returns n rows" \
     "FROM ${D} METADATA _id, _source | KEEP _id, _source | LIMIT 13" 13
 
-  log "-- Known pushdown gaps (probes; non-fatal) -------------------"
-  # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
-  # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
-
-  # Grouped COUNT BY a time BUCKET — the SigEvents histogram core (function grouping not pushed).
-  probe_gap "grouped COUNT BY BUCKET(@timestamp, 1 hour)" \
+  # 12. (F1) Grouped COUNT BY a time BUCKET — the SigEvents histogram core. The grouping function is extracted
+  # into an Eval, looked through, and rendered remotely as BY b = BUCKET(...), so it must match direct-remote.
+  assert_match "grouped COUNT BY BUCKET(@timestamp, 1 hour)" \
     "FROM ${D} | STATS c = COUNT(*) BY b = BUCKET(@timestamp, 1 hour) | SORT b" \
     "FROM ${T} | STATS c = COUNT(*) BY b = BUCKET(@timestamp, 1 hour) | SORT b"
 
-  # Grouped COUNT BY DATE_TRUNC — same family, different function.
-  probe_gap "grouped COUNT BY DATE_TRUNC(1 hour, @timestamp)" \
+  # 13. (F1) Grouped COUNT BY DATE_TRUNC — same family, different function; also pushed via the Eval look-through.
+  assert_match "grouped COUNT BY DATE_TRUNC(1 hour, @timestamp)" \
     "FROM ${D} | STATS c = COUNT(*) BY b = DATE_TRUNC(1 hour, @timestamp) | SORT b" \
     "FROM ${T} | STATS c = COUNT(*) BY b = DATE_TRUNC(1 hour, @timestamp) | SORT b"
 
-  # Grouped COUNT BY a computed EVAL key (CONCAT) — computed grouping key not pushed.
-  probe_gap "grouped COUNT BY computed EVAL key (CONCAT)" \
+  # 14. (F1) Grouped COUNT BY a computed EVAL key (CONCAT) — the explicit EVAL is extracted into the same Eval
+  # shape and its source text is forwarded, so a computed string grouping key is pushed and must match.
+  assert_match "grouped COUNT BY computed EVAL key (CONCAT)" \
     "FROM ${D} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k" \
     "FROM ${T} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k"
+
+  log "-- Known pushdown gaps (probes; non-fatal) -------------------"
+  # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
+  # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
 
   # Grouped metric aggregates (MIN/MAX/SUM/AVG) by keyword — only COUNT is pushed for grouped STATS today.
   probe_gap "grouped MAX/MIN metric BY keyword" \

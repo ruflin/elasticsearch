@@ -29,6 +29,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
@@ -166,7 +167,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
      * carry this. NOT serialized — coordinator-only, set by {@code PushConnectorStatsToExternalSource}.
      */
     private final List<RemoteAggregate> pushedAggregates;
-    private final List<String> pushedGroupings;
+    private final List<RemoteGrouping> pushedGroupings;
     /**
      * When {@code true}, the pushed aggregate sits in the {@code INITIAL} position of a {@code FINAL(INITIAL(source))}
      * plan, so the source must emit intermediate aggregator state ({@code [value, seen]} per aggregate) for the
@@ -291,7 +292,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         @Nullable BlockHash.TopNDef pushedTopN,
         List<Order> pushedSort,
         List<RemoteAggregate> pushedAggregates,
-        List<String> pushedGroupings,
+        List<RemoteGrouping> pushedGroupings,
         boolean pushedAggregateIntermediate,
         Integer estimatedRowSize,
         FileList fileList,
@@ -880,7 +881,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
      */
     public ExternalSourceExec withPushedAggregate(
         List<RemoteAggregate> newPushedAggregates,
-        List<String> newPushedGroupings,
+        List<RemoteGrouping> newPushedGroupings,
         List<Attribute> newOutput,
         boolean intermediate
     ) {
@@ -920,7 +921,7 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
     }
 
     /** Group keys paired with {@link #pushedAggregates()} ({@code STATS ... BY <these>}). Empty for ungrouped. */
-    public List<String> pushedGroupings() {
+    public List<RemoteGrouping> pushedGroupings() {
         return pushedGroupings;
     }
 

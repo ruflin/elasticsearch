@@ -17,6 +17,7 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 
 import java.util.List;
@@ -65,7 +66,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         int rowLimit,
         List<RemoteSort> pushedSort,
         List<RemoteAggregate> pushedAggregates,
-        List<String> pushedGroupings
+        List<RemoteGrouping> pushedGroupings
     ) {
         return new QueryRequest(
             TARGET,
@@ -98,9 +99,30 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     public void testGroupedCountByKeywordRenders() {
         // FROM logs | STATS c = COUNT(*) BY service.name — grouped count by a plain keyword field is pushed.
         String query = ElasticsearchConnector.buildRemoteQuery(
-            request(List.of(), -1, List.of(), List.of(new RemoteAggregate("c", "COUNT", null)), List.of("service.name"))
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(new RemoteAggregate("c", "COUNT", null)),
+                List.of(RemoteGrouping.ofField("service.name"))
+            )
         );
         assertThat(query, equalTo("FROM logs | STATS `c` = COUNT(*) BY `service.name`"));
+    }
+
+    public void testGroupedCountByTimeBucketRenders() {
+        // FROM logs | STATS c = COUNT(*) BY bucket = BUCKET(@timestamp, 5 minutes) — the SigEvents histogram core.
+        // The grouping is a computed RemoteGrouping carrying the already-rendered BUCKET expression and an alias.
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(new RemoteAggregate("c", "COUNT", null)),
+                List.of(RemoteGrouping.ofExpression("bucket", "BUCKET(@timestamp, 5 minutes)"))
+            )
+        );
+        assertThat(query, equalTo("FROM logs | STATS `c` = COUNT(*) BY `bucket` = BUCKET(@timestamp, 5 minutes)"));
     }
 
     public void testMatchStyleProjectedReadRenders() {

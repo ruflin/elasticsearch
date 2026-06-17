@@ -52,7 +52,7 @@ public record QueryRequest(
     List<Expression> pushedFilters,
     List<RemoteSort> pushedSort,
     List<RemoteAggregate> pushedAggregates,
-    List<String> pushedGroupings,
+    List<RemoteGrouping> pushedGroupings,
     boolean aggregateIntermediateState,
     BlockFactory blockFactory
 ) {

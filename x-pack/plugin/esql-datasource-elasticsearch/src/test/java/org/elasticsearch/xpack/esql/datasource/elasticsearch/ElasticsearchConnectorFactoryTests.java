@@ -18,6 +18,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 
@@ -310,7 +311,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             List.of(),
             List.of(new RemoteAggregate("c", "COUNT", null), new RemoteAggregate("mx", "MAX", "bytes")),
-            List.of("data_stream.type"),
+            List.of(RemoteGrouping.ofField("data_stream.type")),
             false,
             null
         );
@@ -331,7 +332,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             List.of(new RemoteSort("c", false, false)),
             List.of(new RemoteAggregate("c", "COUNT", null)),
-            List.of("service.name"),
+            List.of(RemoteGrouping.ofField("service.name")),
             false,
             null
         );
