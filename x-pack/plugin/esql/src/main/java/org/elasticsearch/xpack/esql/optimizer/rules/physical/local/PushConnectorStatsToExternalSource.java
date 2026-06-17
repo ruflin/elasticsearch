@@ -24,6 +24,7 @@ import org.elasticsearch.xpack.esql.expression.function.aggregate.Count;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Max;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Min;
 import org.elasticsearch.xpack.esql.expression.function.aggregate.Sum;
+import org.elasticsearch.xpack.esql.expression.function.scalar.convert.ToDouble;
 import org.elasticsearch.xpack.esql.optimizer.LocalPhysicalOptimizerContext;
 import org.elasticsearch.xpack.esql.optimizer.PhysicalOptimizerRules;
 import org.elasticsearch.xpack.esql.plan.physical.AggregateExec;
@@ -113,17 +114,20 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             || ext.pushedAggregates().isEmpty() == false) {
             return aggregateExec;
         }
-        // Build the map of eval-field name -> rendered remote expression for a looked-through Eval (e.g. a time
-        // BUCKET). Only push when EVERY eval field is consumed as a grouping key below; a leftover eval field would
-        // be dropped by removing the Eval, changing the result. Each field is rendered from its source text, which
-        // is valid remote ES|QL because the remote runs the same query language over the same field names.
-        Map<String, String> evalRenderings = evalGroupingRenderings(evalExec);
-        if (evalRenderings == null) {
-            return aggregateExec;
+        // Fields of a looked-through Eval, keyed by output name (empty when the aggregate sits directly over the
+        // source). An eval field is consumed either by a grouping key (e.g. a time BUCKET, rendered from source text)
+        // or by an aggregate input (e.g. the TO_DOUBLE(field) AVG-over-long's surrogate introduces, rendered via a
+        // field wrapper). Only push when EVERY eval field is consumed; a leftover field would be silently dropped by
+        // removing the Eval, changing the result.
+        Map<String, Alias> evalFields = evalFieldsByName(evalExec);
+        Set<String> sourceFieldNames = new HashSet<>();
+        for (Attribute attr : ext.output()) {
+            sourceFieldNames.add(attr.name());
         }
         // Supports ungrouped STATS and STATS ... BY one or more keys, where each key is a plain source attribute or
         // an eval-computed expression (e.g. BUCKET). The grouping is always a reference here; computed keys reference
-        // the looked-through Eval's output.
+        // the looked-through Eval's output and are rendered from their source text (valid remote ES|QL because the
+        // remote runs the same query language over the same field names).
         List<? extends Expression> groupings = aggregateExec.groupings();
         List<RemoteGrouping> remoteGroupings = new ArrayList<>(groupings.size());
         Set<String> consumedEvalFields = new HashSet<>();
@@ -133,25 +137,21 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
                 return aggregateExec;
             }
             String name = groupAttribute.name();
-            String rendered = evalRenderings.get(name);
-            if (rendered != null) {
+            Alias evalField = evalFields.get(name);
+            if (evalField != null) {
+                String rendered = renderGroupingExpression(evalField, sourceFieldNames);
+                if (rendered == null) {
+                    // A computed grouping with no faithful source text (or referencing a non-source column) cannot be
+                    // forwarded; leave the STATS local.
+                    return aggregateExec;
+                }
                 remoteGroupings.add(RemoteGrouping.ofExpression(name, rendered));
                 consumedEvalFields.add(name);
             } else {
                 remoteGroupings.add(RemoteGrouping.ofField(name));
             }
         }
-        // Every eval field must be a grouping key; otherwise removing the Eval would drop a needed computed column.
-        if (consumedEvalFields.size() != evalRenderings.size()) {
-            return aggregateExec;
-        }
 
-        // A per-aggregate filter (STATS c = COUNT(*) WHERE <pred>) is forwarded by its source text, which is only
-        // valid remotely when the predicate references plain source columns the remote knows under the same name.
-        Set<String> sourceFieldNames = new HashSet<>();
-        for (Attribute attr : ext.output()) {
-            sourceFieldNames.add(attr.name());
-        }
         boolean grouped = groupings.isEmpty() == false;
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
         for (NamedExpression agg : aggregateExec.aggregates()) {
@@ -160,9 +160,9 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
                 // intermediate state from a recipe (RemoteAggregateState) the rule derives from the function's
                 // intermediate-state descriptor, deriving the seen marker from value nullness (so a null per-group
                 // result is skipped by the FINAL merge) and filling auxiliary channels (SUM-double's Kahan delta,
-                // SUM-long's overflow failed) with their identity value. AVG is a surrogate over SUM+COUNT and never
-                // reaches here. Anything else returns null from toRemoteAggregate and leaves the STATS local.
-                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames, grouped);
+                // SUM-long's overflow failed) with their identity value. AVG is a surrogate over SUM+COUNT and
+                // reaches here only as its rewritten SUM/COUNT pair. Anything else returns null and leaves it local.
+                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames, grouped, evalFields, consumedEvalFields);
                 if (remote == null) {
                     return aggregateExec;
                 }
@@ -178,6 +178,11 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         if (remoteAggregates.isEmpty()) {
             return aggregateExec;
         }
+        // Every looked-through Eval field must be consumed by a grouping key or an aggregate input; a leftover field
+        // would be silently dropped by removing the Eval, changing the result.
+        if (consumedEvalFields.size() != evalFields.size()) {
+            return aggregateExec;
+        }
         // The source must produce exactly what the replaced aggregate node produced: its final output for SINGLE,
         // or its intermediate attributes for INITIAL (so the FINAL aggregate above consumes the right schema).
         List<Attribute> output = intermediate ? aggregateExec.intermediateAttributes() : aggregateExec.output();
@@ -185,33 +190,23 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
     }
 
     /**
-     * Renders the fields of a looked-through grouping {@link EvalExec} into remote ES|QL fragments, keyed by output
-     * name. Returns an empty map when there is no Eval (the aggregate sits directly over the source). Returns
-     * {@code null} (bail) when any eval field cannot be safely forwarded — i.e. its source text is unavailable, or it
-     * references another eval output rather than only source columns (which the remote would not have under that
-     * name). The source text of a parsed expression (e.g. {@code BUCKET(@timestamp, 5 minutes)}) is valid remote
-     * ES|QL because the remote runs the same query language over the same field names.
+     * Renders a looked-through Eval field used as a grouping key to its remote ES|QL source text (e.g.
+     * {@code BUCKET(@timestamp, 5 minutes)}), or {@code null} when it cannot be safely forwarded — its source text is
+     * unavailable (a synthesized expression), or it references anything other than source columns the remote knows
+     * under the same name. The source text of a parsed expression is valid remote ES|QL because the remote runs the
+     * same query language over the same field names.
      */
-    private static Map<String, String> evalGroupingRenderings(EvalExec evalExec) {
-        if (evalExec == null) {
-            return Map.of();
+    private static String renderGroupingExpression(Alias evalField, Set<String> sourceFieldNames) {
+        String sourceText = evalField.child().sourceText();
+        if (sourceText == null || sourceText.isBlank()) {
+            return null;
         }
-        Map<String, String> renderings = new HashMap<>();
-        for (Alias field : evalExec.fields()) {
-            String sourceText = field.child().sourceText();
-            if (sourceText == null || sourceText.isBlank()) {
-                // No original text to forward (e.g. a synthesized expression). Bail rather than guess a rendering.
+        for (Attribute referenced : evalField.child().references()) {
+            if (sourceFieldNames.contains(referenced.name()) == false) {
                 return null;
             }
-            // A field that references a prior eval field cannot be forwarded as-is: the remote has no such column.
-            for (Alias other : evalExec.fields()) {
-                if (other != field && field.child().anyMatch(e -> e instanceof Attribute a && a.name().equals(other.name()))) {
-                    return null;
-                }
-            }
-            renderings.put(field.name(), sourceText);
         }
-        return renderings;
+        return sourceText;
     }
 
     /** Whether {@code agg} is a bare reference to one of the grouping keys (so the connector renders it via BY). */
@@ -246,7 +241,9 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         String outputName,
         AggregateFunction fn,
         Set<String> sourceFieldNames,
-        boolean grouped
+        boolean grouped,
+        Map<String, Alias> evalFields,
+        Set<String> consumedEvalFields
     ) {
         String filter = renderAggregateFilter(fn, sourceFieldNames);
         if (fn.hasFilter() && filter == null) {
@@ -274,12 +271,67 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             if (AggregateFunction.NO_WINDOW.equals(sum.window()) == false) {
                 return null;
             }
-            if (sum.field() instanceof Attribute attr) {
+            Expression input = sum.field();
+            if (input instanceof Attribute attr) {
+                // The SUM input may reference a looked-through Eval field (e.g. TO_DOUBLE(field) extracted from
+                // AVG-over-long's surrogate). Render that Eval field and mark it consumed so the Eval can be removed;
+                // otherwise it is a plain source column rendered as a quoted identifier.
+                Alias evalField = evalFields.get(attr.name());
+                if (evalField != null) {
+                    RemoteAggregate remote = wrappedSumFromEvalInput(outputName, fn, grouped, filter, evalField.child(), sourceFieldNames);
+                    if (remote == null) {
+                        return null;
+                    }
+                    consumedEvalFields.add(attr.name());
+                    return remote;
+                }
                 return new RemoteAggregate(outputName, "SUM", attr.name(), filter, intermediateState(fn, grouped));
             }
             return null;
         }
         return null;
+    }
+
+    /**
+     * Builds a {@link RemoteAggregate} for a SUM whose input is an expression extracted into a looked-through Eval,
+     * or {@code null} when it cannot be forwarded safely. Only a small, precisely-renderable set is supported because
+     * surrogate-synthesized expressions (e.g. AVG-over-long's {@code ToDouble}) do not carry faithful source text:
+     * <ul>
+     *   <li>a {@link ToDouble} over a plain source column becomes {@code SUM(TO_DOUBLE(<field>))};</li>
+     *   <li>a bare source-column reference becomes a plain {@code SUM(<field>)}.</li>
+     * </ul>
+     * Anything else returns {@code null} so the aggregate stays local rather than forwarding an unfaithful rendering.
+     * Identifier quoting is left to the connector; only the field name and the wrapping function name are forwarded.
+     */
+    private static RemoteAggregate wrappedSumFromEvalInput(
+        String outputName,
+        AggregateFunction fn,
+        boolean grouped,
+        String filter,
+        Expression evalInput,
+        Set<String> sourceFieldNames
+    ) {
+        if (evalInput instanceof ToDouble toDouble
+            && toDouble.field() instanceof Attribute attr
+            && sourceFieldNames.contains(attr.name())) {
+            return RemoteAggregate.ofWrappedField(outputName, "SUM", "TO_DOUBLE", attr.name(), filter, intermediateState(fn, grouped));
+        }
+        if (evalInput instanceof Attribute attr && sourceFieldNames.contains(attr.name())) {
+            return new RemoteAggregate(outputName, "SUM", attr.name(), filter, intermediateState(fn, grouped));
+        }
+        return null;
+    }
+
+    /** Eval fields keyed by output name (empty when there is no looked-through Eval). */
+    private static Map<String, Alias> evalFieldsByName(EvalExec evalExec) {
+        if (evalExec == null) {
+            return Map.of();
+        }
+        Map<String, Alias> fields = new HashMap<>();
+        for (Alias field : evalExec.fields()) {
+            fields.put(field.name(), field);
+        }
+        return fields;
     }
 
     /**

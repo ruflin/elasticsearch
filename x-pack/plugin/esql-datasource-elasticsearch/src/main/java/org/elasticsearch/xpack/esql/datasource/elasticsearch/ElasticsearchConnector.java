@@ -252,7 +252,15 @@ class ElasticsearchConnector implements Connector {
             }
             RemoteAggregate agg = aggregates.get(i);
             query.append(EsqlIdentifiers.quote(agg.outputName())).append(" = ").append(agg.function()).append('(');
-            query.append(agg.field() == null ? "*" : EsqlIdentifiers.quote(agg.field()));
+            if (agg.field() == null) {
+                query.append('*');
+            } else if (agg.fieldFunction() != null) {
+                // Input wrapped in a scalar function (e.g. SUM(TO_DOUBLE(`event.duration`))). The connector owns
+                // identifier quoting, so only the field is quoted; the function name is rendered verbatim.
+                query.append(agg.fieldFunction()).append('(').append(EsqlIdentifiers.quote(agg.field())).append(')');
+            } else {
+                query.append(EsqlIdentifiers.quote(agg.field()));
+            }
             query.append(')');
             if (agg.filter() != null) {
                 // Per-aggregate filter: COUNT(*) WHERE <already-rendered remote boolean fragment>.
