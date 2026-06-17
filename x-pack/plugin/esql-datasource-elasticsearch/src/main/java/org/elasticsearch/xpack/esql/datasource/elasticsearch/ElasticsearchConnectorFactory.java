@@ -350,13 +350,25 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
      * {@link #LINK_LOCAL_SAFE_DNS_RESOLVER}, which checks the address actually dialled.
      */
     private static void rejectPrivateHost(String host, String location) {
-        // URI.getHost() already strips IPv6 brackets, so InetAddresses.isInetAddress() can parse host
-        // directly. It returns false for hostnames without triggering a DNS lookup, so genuine hostnames
-        // are left for the connection-time resolver.
-        if (InetAddresses.isInetAddress(host) == false) {
+        // Strip surrounding IPv6 brackets before the literal check. URI.getHost() is not consistent across JDKs:
+        // older versions return a bare "fe80::1" for a bracketed authority, but JDK 25+ returns "[fe80::1]" with
+        // the brackets attached. InetAddresses.isInetAddress() rejects the bracketed form, which would silently let
+        // a link-local IPv6 literal through the SSRF pre-check. Normalising here keeps the guard JDK-independent.
+        // It returns false for hostnames without triggering a DNS lookup, so genuine hostnames are left for the
+        // connection-time resolver.
+        String literal = stripIpv6Brackets(host);
+        if (InetAddresses.isInetAddress(literal) == false) {
             return;
         }
-        rejectLinkLocal(InetAddresses.forString(host), location);
+        rejectLinkLocal(InetAddresses.forString(literal), location);
+    }
+
+    /** Removes the surrounding {@code [ ]} from a bracketed IPv6 literal host; returns other hosts unchanged. */
+    private static String stripIpv6Brackets(String host) {
+        if (host.length() >= 2 && host.charAt(0) == '[' && host.charAt(host.length() - 1) == ']') {
+            return host.substring(1, host.length() - 1);
+        }
+        return host;
     }
 
     /**

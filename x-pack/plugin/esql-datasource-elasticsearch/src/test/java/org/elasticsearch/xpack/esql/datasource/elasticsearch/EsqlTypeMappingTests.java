@@ -159,8 +159,14 @@ public class EsqlTypeMappingTests extends ESTestCase {
         // Spatial types and unsigned_long are valid remote column types not yet decoded;
         // they must surface as null rather than crashing queries that project these columns.
         for (DataType type : new DataType[] {
-            DataType.GEO_POINT, DataType.GEO_SHAPE, DataType.CARTESIAN_POINT, DataType.CARTESIAN_SHAPE,
-            DataType.GEOHEX, DataType.GEOHASH, DataType.GEOTILE, DataType.UNSIGNED_LONG }) {
+            DataType.GEO_POINT,
+            DataType.GEO_SHAPE,
+            DataType.CARTESIAN_POINT,
+            DataType.CARTESIAN_SHAPE,
+            DataType.GEOHEX,
+            DataType.GEOHASH,
+            DataType.GEOTILE,
+            DataType.UNSIGNED_LONG }) {
             try (Block block = EsqlTypeMapping.toBlock(type, List.of("ignored"), 2, blockFactory)) {
                 assertTrue("expected all-null block for " + type, block.areAllValuesNull());
                 assertEquals(2, block.getPositionCount());
