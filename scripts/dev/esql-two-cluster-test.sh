@@ -643,6 +643,23 @@ run_verification_suite() {
     "FROM ${D} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k" \
     "FROM ${T} | EVAL k = CONCAT(\`service.name\`, \\\"-\\\", \`log.level\`) | STATS c = COUNT(*) BY k | SORT k"
 
+  # 15. (F3) Per-aggregate filter: STATS errors = COUNT(*) WHERE <pred>. The filter rides on the aggregate
+  # (not a leading WHERE) and is rendered as `errors` = COUNT(*) WHERE <pred> on the remote leg, so it must
+  # match direct-remote. This is the SigEvents conditional-count shape (error counts within a window).
+  assert_match "per-aggregate filtered COUNT (STATS COUNT(*) WHERE level==ERROR)" \
+    "FROM ${D} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\"" \
+    "FROM ${T} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\""
+
+  # 16. (F3) Mixed filtered + plain aggregates in one STATS, the ratio shape SigEvents uses (errors vs total).
+  assert_match "per-aggregate filtered + plain COUNT in one STATS" \
+    "FROM ${D} | STATS errors = COUNT(*) WHERE \`http.response.status_code\` >= 500, total = COUNT(*)" \
+    "FROM ${T} | STATS errors = COUNT(*) WHERE \`http.response.status_code\` >= 500, total = COUNT(*)"
+
+  # 17. (F3) Per-aggregate filter combined with a grouping — filtered COUNT per group.
+  assert_match "per-aggregate filtered COUNT BY keyword" \
+    "FROM ${D} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\" BY \`service.name\` | SORT \`service.name\`" \
+    "FROM ${T} | STATS errors = COUNT(*) WHERE \`log.level\` == \\\"ERROR\\\" BY \`service.name\` | SORT \`service.name\`"
+
   log "-- Known pushdown gaps (probes; non-fatal) -------------------"
   # These compare connector vs direct-remote too, but a mismatch is expected until the pushdown work
   # lands. When one starts matching, the probe prints "GAP CLOSED" so it can be promoted to assert_match.
