@@ -252,6 +252,10 @@ class ElasticsearchConnector implements Connector {
             query.append(EsqlIdentifiers.quote(agg.outputName())).append(" = ").append(agg.function()).append('(');
             query.append(agg.field() == null ? "*" : EsqlIdentifiers.quote(agg.field()));
             query.append(')');
+            if (agg.filter() != null) {
+                // Per-aggregate filter: COUNT(*) WHERE <already-rendered remote boolean fragment>.
+                query.append(" WHERE ").append(agg.filter());
+            }
         }
         if (groupings != null && groupings.isEmpty() == false) {
             query.append(" BY ");

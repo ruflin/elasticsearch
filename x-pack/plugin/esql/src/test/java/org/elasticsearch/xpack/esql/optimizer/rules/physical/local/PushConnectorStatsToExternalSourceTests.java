@@ -324,6 +324,35 @@ public class PushConnectorStatsToExternalSourceTests extends ESTestCase {
         assertEquals("message", resultExt.pushedAggregates().get(0).field());
     }
 
+    public void testFilteredCountPushed() {
+        // STATS errors = COUNT(*) WHERE message == "error": the per-aggregate filter references only the source
+        // column `message`, so its source text is forwarded onto the RemoteAggregate as a remote WHERE clause.
+        ExternalSourceExec ext = connectorSource();
+        Equals predicate = new Equals(new Source(Location.EMPTY, "message == \"error\""), MESSAGE, Literal.keyword(Source.EMPTY, "error"));
+        Count filtered = (Count) new Count(Source.EMPTY, Literal.keyword(Source.EMPTY, "*")).withFilter(predicate);
+        AggregateExec agg = singleAggregate(ext, alias("errors", filtered));
+
+        PhysicalPlan result = applyRule(agg, true);
+
+        assertThat(result, instanceOf(ExternalSourceExec.class));
+        RemoteAggregate remote = ((ExternalSourceExec) result).pushedAggregates().get(0);
+        assertEquals("COUNT", remote.function());
+        assertEquals("message == \"error\"", remote.filter());
+    }
+
+    public void testFilteredCountNotPushedWhenFilterReferencesUnknownColumn() {
+        // The filter references `other`, which is not a source column the remote knows, so the aggregate (and thus
+        // the whole STATS) is left for local execution rather than rendering an invalid remote WHERE.
+        ExternalSourceExec ext = connectorSource();
+        ReferenceAttribute other = referenceAttribute("other", DataType.KEYWORD);
+        Equals predicate = new Equals(new Source(Location.EMPTY, "other == \"x\""), other, Literal.keyword(Source.EMPTY, "x"));
+        Count filtered = (Count) new Count(Source.EMPTY, Literal.keyword(Source.EMPTY, "*")).withFilter(predicate);
+        AggregateExec agg = singleAggregate(ext, alias("c", filtered));
+
+        PhysicalPlan result = applyRule(agg, true);
+        assertThat(result, instanceOf(AggregateExec.class));
+    }
+
     public void testNotPushedForUnsupportedFunctionYet() {
         // SUM has a multi-channel intermediate state and is outside this step's scope; the local aggregate remains.
         AggregateExec agg = singleAggregate(connectorSource(), alias("s", new Sum(Source.EMPTY, MESSAGE)));

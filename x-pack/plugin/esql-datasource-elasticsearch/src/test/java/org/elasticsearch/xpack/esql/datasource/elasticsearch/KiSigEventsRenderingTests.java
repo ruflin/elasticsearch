@@ -125,6 +125,29 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         assertThat(query, equalTo("FROM logs | STATS `c` = COUNT(*) BY `bucket` = BUCKET(@timestamp, 5 minutes)"));
     }
 
+    public void testFilteredCountStatsRenders() {
+        // FROM logs | STATS errors = COUNT(*) WHERE log.level == "error" — a per-aggregate filter is rendered as a
+        // WHERE clause attached to the aggregate. This is the SigEvents conditional-count shape (e.g. error rate).
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(List.of(), -1, List.of(), List.of(new RemoteAggregate("errors", "COUNT", null, "log.level == \"error\"")), List.of())
+        );
+        assertThat(query, equalTo("FROM logs | STATS `errors` = COUNT(*) WHERE log.level == \"error\""));
+    }
+
+    public void testMultipleFilteredAndPlainAggregatesRender() {
+        // A mix of a filtered count and a plain count in the same STATS, as SigEvents uses for ratios.
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(
+                List.of(),
+                -1,
+                List.of(),
+                List.of(new RemoteAggregate("errors", "COUNT", null, "status_code >= 500"), new RemoteAggregate("total", "COUNT", null)),
+                List.of()
+            )
+        );
+        assertThat(query, equalTo("FROM logs | STATS `errors` = COUNT(*) WHERE status_code >= 500, `total` = COUNT(*)"));
+    }
+
     public void testMatchStyleProjectedReadRenders() {
         // The non-aggregated leg of a match-style read: project a couple of fields with a SORT + LIMIT. Note this
         // is only what the connector CAN render; the KI match shape additionally needs METADATA _id, _source and

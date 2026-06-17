@@ -140,6 +140,12 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
             return aggregateExec;
         }
 
+        // A per-aggregate filter (STATS c = COUNT(*) WHERE <pred>) is forwarded by its source text, which is only
+        // valid remotely when the predicate references plain source columns the remote knows under the same name.
+        Set<String> sourceFieldNames = new HashSet<>();
+        for (Attribute attr : ext.output()) {
+            sourceFieldNames.add(attr.name());
+        }
         boolean grouped = groupings.isEmpty() == false;
         List<RemoteAggregate> remoteAggregates = new ArrayList<>(aggregateExec.aggregates().size());
         for (NamedExpression agg : aggregateExec.aggregates()) {
@@ -151,7 +157,7 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
                 if (grouped && fn instanceof Count == false) {
                     return aggregateExec;
                 }
-                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn);
+                RemoteAggregate remote = toRemoteAggregate(alias.name(), fn, sourceFieldNames);
                 if (remote == null) {
                     return aggregateExec;
                 }
@@ -226,31 +232,60 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
      * supported, because the connector emits intermediate state by interleaving a single {@code seen} marker after
      * each value block. COUNT, MIN and MAX share that layout. SUM (DOUBLE adds a Kahan {@code delta} channel) and
      * AVG (a {@code sum}+{@code count} pair) do not and are handled in a later step.
+     *
+     * <p>A per-aggregate filter ({@code COUNT(*) WHERE <pred>}) is forwarded by rendering the predicate's source
+     * text; it is pushed only when {@code <pred>} references plain source columns (in {@code sourceFieldNames}) the
+     * remote knows under the same name, otherwise the aggregate is left for local execution.
      */
-    private static RemoteAggregate toRemoteAggregate(String outputName, AggregateFunction fn) {
-        if (fn.hasFilter()) {
+    private static RemoteAggregate toRemoteAggregate(String outputName, AggregateFunction fn, Set<String> sourceFieldNames) {
+        String filter = renderAggregateFilter(fn, sourceFieldNames);
+        if (fn.hasFilter() && filter == null) {
+            // A filter is present but cannot be safely forwarded; leave the whole aggregate to local execution.
             return null;
         }
         if (fn instanceof Count count) {
             Expression field = count.field();
             if (field.foldable()) {
                 // COUNT(*) / COUNT(<literal>): no input field.
-                return new RemoteAggregate(outputName, "COUNT", null);
+                return new RemoteAggregate(outputName, "COUNT", null, filter);
             }
-            return field instanceof Attribute attr ? new RemoteAggregate(outputName, "COUNT", attr.name()) : null;
+            return field instanceof Attribute attr ? new RemoteAggregate(outputName, "COUNT", attr.name(), filter) : null;
         }
         if (fn instanceof Min min) {
-            return fieldAggregate(outputName, "MIN", min.field());
+            return fieldAggregate(outputName, "MIN", min.field(), filter);
         }
         if (fn instanceof Max max) {
-            return fieldAggregate(outputName, "MAX", max.field());
+            return fieldAggregate(outputName, "MAX", max.field(), filter);
         }
         return null;
     }
 
+    /**
+     * Renders a per-aggregate filter to remote ES|QL, or {@code null} when there is no filter to push or it cannot be
+     * forwarded safely. Returns {@code null} (no filter) when {@code fn.hasFilter()} is false. Otherwise returns the
+     * predicate's source text when it is present and references only plain source columns, or {@code null} (bail)
+     * when the source text is missing or the predicate references a column the remote does not have.
+     */
+    private static String renderAggregateFilter(AggregateFunction fn, Set<String> sourceFieldNames) {
+        if (fn.hasFilter() == false) {
+            return null;
+        }
+        Expression filter = fn.filter();
+        String sourceText = filter.sourceText();
+        if (sourceText == null || sourceText.isBlank()) {
+            return null;
+        }
+        for (Attribute referenced : filter.references()) {
+            if (sourceFieldNames.contains(referenced.name()) == false) {
+                return null;
+            }
+        }
+        return sourceText;
+    }
+
     /** Builds a {@link RemoteAggregate} for a single-field aggregate, or {@code null} when the input is not a plain attribute. */
-    private static RemoteAggregate fieldAggregate(String outputName, String function, Expression field) {
-        return field instanceof Attribute attr ? new RemoteAggregate(outputName, function, attr.name()) : null;
+    private static RemoteAggregate fieldAggregate(String outputName, String function, Expression field, String filter) {
+        return field instanceof Attribute attr ? new RemoteAggregate(outputName, function, attr.name(), filter) : null;
     }
 
     private static boolean aggregatePushdownSupported(String sourceType, LocalPhysicalOptimizerContext ctx) {

@@ -21,8 +21,11 @@ package org.elasticsearch.xpack.esql.datasources.spi;
  * @param function the aggregate function name, upper-cased (e.g. {@code COUNT}, {@code MIN}, {@code MAX},
  *        {@code SUM}, {@code AVG})
  * @param field the input field name, or {@code null} for argument-less aggregates such as {@code COUNT(*)}
+ * @param filter the already-rendered remote ES|QL boolean fragment of a per-aggregate filter (the
+ *        {@code level == "error"} in {@code STATS c = COUNT(*) WHERE level == "error"}), or {@code null} for an
+ *        unfiltered aggregate. The connector renders {@code out = FUNC(field) WHERE <filter>}.
  */
-public record RemoteAggregate(String outputName, String function, String field) {
+public record RemoteAggregate(String outputName, String function, String field, String filter) {
 
     public RemoteAggregate {
         if (outputName == null || outputName.isEmpty()) {
@@ -31,5 +34,13 @@ public record RemoteAggregate(String outputName, String function, String field) 
         if (function == null || function.isEmpty()) {
             throw new IllegalArgumentException("RemoteAggregate function must not be null or empty");
         }
+        if (filter != null && filter.isBlank()) {
+            throw new IllegalArgumentException("RemoteAggregate filter must not be blank when present");
+        }
+    }
+
+    /** A remote aggregate without a per-aggregate filter. */
+    public RemoteAggregate(String outputName, String function, String field) {
+        this(outputName, function, field, null);
     }
 }
