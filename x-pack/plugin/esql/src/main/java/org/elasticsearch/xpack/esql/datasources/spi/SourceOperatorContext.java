@@ -71,7 +71,8 @@ public record SourceOperatorContext(
     List<RemoteSort> pushedSort,
     List<RemoteAggregate> pushedAggregates,
     List<RemoteGrouping> pushedGroupings,
-    boolean aggregateIntermediateState
+    boolean aggregateIntermediateState,
+    double pushedSampleProbability
 ) {
     /**
      * Single source of truth for the {@code external_max_concurrent_open_segments} default. Lives in this SPI (leaf)
@@ -158,7 +159,8 @@ public record SourceOperatorContext(
             List.of(),
             List.of(),
             List.of(),
-            false
+            false,
+            FormatReader.NO_SAMPLE
         );
     }
 
@@ -205,7 +207,8 @@ public record SourceOperatorContext(
             List.of(),
             List.of(),
             List.of(),
-            false
+            false,
+            FormatReader.NO_SAMPLE
         );
     }
 
@@ -251,7 +254,8 @@ public record SourceOperatorContext(
             List.of(),
             List.of(),
             List.of(),
-            false
+            false,
+            FormatReader.NO_SAMPLE
         );
     }
 
@@ -295,7 +299,8 @@ public record SourceOperatorContext(
             List.of(),
             List.of(),
             List.of(),
-            false
+            false,
+            FormatReader.NO_SAMPLE
         );
     }
 
@@ -339,6 +344,7 @@ public record SourceOperatorContext(
         private List<RemoteAggregate> pushedAggregates;
         private List<RemoteGrouping> pushedGroupings;
         private boolean aggregateIntermediateState;
+        private double pushedSampleProbability = FormatReader.NO_SAMPLE;
 
         public Builder sourceType(String sourceType) {
             this.sourceType = sourceType;
@@ -522,6 +528,11 @@ public record SourceOperatorContext(
             return this;
         }
 
+        public Builder pushedSampleProbability(double pushedSampleProbability) {
+            this.pushedSampleProbability = pushedSampleProbability;
+            return this;
+        }
+
         public SourceOperatorContext build() {
             return new SourceOperatorContext(
                 sourceType,
@@ -553,7 +564,8 @@ public record SourceOperatorContext(
                 pushedSort,
                 pushedAggregates,
                 pushedGroupings,
-                aggregateIntermediateState
+                aggregateIntermediateState,
+                pushedSampleProbability
             );
         }
     }

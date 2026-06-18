@@ -137,16 +137,19 @@ class ElasticsearchConnector implements Connector {
      * possible, pushes work to the remote cluster so less data crosses the wire:
      * <ul>
      *   <li>{@code WHERE} for the pushed filter expressions (best-effort; see {@link EsqlFilterTranslator}),</li>
+     *   <li>{@code SAMPLE} for the pushed row-keep probability (random sampling over the full remote dataset),</li>
      *   <li>{@code SORT} for the pushed sort keys (paired with the limit, this makes the remote return the
      *       correct global top-N instead of an arbitrary page),</li>
      *   <li>{@code KEEP} for the projected columns,</li>
      *   <li>{@code LIMIT} for the pushed row limit (if any).</li>
      * </ul>
-     * Stage order is {@code FROM | WHERE | SORT | KEEP | LIMIT}: SORT runs before KEEP so a sort key dropped
-     * by the projection is still available when the remote sorts, and before LIMIT so the limit keeps the
-     * top-N rather than the first page. The local plan keeps a safety-net {@code FilterExec}/{@code TopNExec}/
-     * {@code LimitExec} above the source, so an over- or under-rendered pushdown can never produce wrong
-     * results — it only affects how much data is transferred.
+     * Stage order is {@code FROM | WHERE | SAMPLE | SORT | KEEP | LIMIT}: SAMPLE runs after WHERE so the sample is
+     * drawn from the matching rows, and before SORT/LIMIT so the limit keeps a sampled top-N. SORT runs before KEEP
+     * so a sort key dropped by the projection is still available when the remote sorts, and before LIMIT so the
+     * limit keeps the top-N rather than the first page. The local plan keeps a safety-net {@code FilterExec}/
+     * {@code TopNExec}/{@code LimitExec} above the source for filter/sort/limit, so an over- or under-rendered
+     * pushdown of those can never produce wrong results. SAMPLE is the exception: {@code PushSampleToExternalSource}
+     * removes the local {@code SampleExec} (to avoid double-sampling), so the remote {@code SAMPLE} is authoritative.
      */
     static String buildRemoteQuery(QueryRequest request) {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
@@ -156,6 +159,8 @@ class ElasticsearchConnector implements Connector {
         appendMetadata(query, request);
         // Filter remotely so the remote cluster discards non-matching rows before returning them.
         EsqlFilterTranslator.toWhereClause(request.pushedFilters()).ifPresent(where -> query.append(" | WHERE ").append(where));
+        // Sample remotely (after WHERE) so the random draw happens over the full matching set on the remote cluster.
+        appendSample(query, request.pushedSampleProbability());
         // A pushed aggregate replaces row materialization entirely: render STATS and return aggregate output rows.
         // SORT/LIMIT may still apply to those aggregate rows (for STATS ... | SORT ... | LIMIT ...).
         List<RemoteAggregate> aggregates = request.pushedAggregates();
@@ -173,6 +178,18 @@ class ElasticsearchConnector implements Connector {
         // Push the row limit so the remote cluster stops early instead of returning every matching row.
         appendLimit(query, request.rowLimit());
         return query.toString();
+    }
+
+    /**
+     * Appends a {@code SAMPLE <probability>} stage when a sample was pushed ({@code probability != NO_SAMPLE}).
+     * The probability is rendered with {@link Double#toString(double)} so it is locale-independent (no {@code ,}
+     * decimal separator) and round-trips exactly; the value is already constrained to the open interval
+     * {@code (0, 1)} by {@code PushSampleToExternalSource}, which is what the remote ES|QL {@code SAMPLE} accepts.
+     */
+    private static void appendSample(StringBuilder query, double probability) {
+        if (probability != FormatReader.NO_SAMPLE) {
+            query.append(" | SAMPLE ").append(Double.toString(probability));
+        }
     }
 
     /**
