@@ -71,9 +71,25 @@ class ClickHouseConnector implements Connector {
     }
 
     private ResultCursor doExecute(QueryRequest request) {
-        String sql = buildSql(request);
+        // An ungrouped COUNT(*) projects no columns. Returning column data would be wasteful and, more
+        // importantly, a columnar response with zero columns carries no row count, so the count operator
+        // would see zero rows. Instead ask ClickHouse for count() and emit a positions-only page.
+        boolean countOnly = request.attributes() == null || request.attributes().isEmpty();
+        String sql = buildSql(request, countOnly);
         logger.debug("Executing ClickHouse query: {}", sql);
 
+        byte[] body = post(sql);
+        try {
+            if (countOnly) {
+                return ClickHouseResultCursor.forRowCount(new ByteArrayInputStream(body), request.blockFactory());
+            }
+            return new ClickHouseResultCursor(new ByteArrayInputStream(body), request.attributes(), request.blockFactory());
+        } catch (IOException e) {
+            throw new UncheckedIOException("ClickHouse response parse failed: " + e.getMessage(), e);
+        }
+    }
+
+    private byte[] post(String sql) {
         String scheme = useTls ? "https" : "http";
         URI uri = URI.create(scheme + "://" + host + ":" + port + "/");
 
@@ -92,7 +108,7 @@ class ClickHouseConnector implements Connector {
                 String errorBody = new String(response.body(), StandardCharsets.UTF_8);
                 throw new IOException("ClickHouse returned HTTP " + response.statusCode() + ": " + errorBody);
             }
-            return new ClickHouseResultCursor(new ByteArrayInputStream(response.body()), request.attributes(), request.blockFactory());
+            return response.body();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while executing ClickHouse query", e);
@@ -101,7 +117,13 @@ class ClickHouseConnector implements Connector {
         }
     }
 
-    private String buildSql(QueryRequest request) {
+    private String buildSql(QueryRequest request, boolean countOnly) {
+        String fromClause = quoteIdentifier(database) + "." + quoteIdentifier(table);
+        if (countOnly) {
+            // FORMAT JSONCompactColumns yields [[N]] for a single aggregate column.
+            return "SELECT count() FROM " + fromClause + " FORMAT JSONCompactColumns";
+        }
+
         List<String> columns = request.projectedColumns();
         String selectClause;
         if (columns == null || columns.isEmpty()) {
@@ -114,7 +136,6 @@ class ClickHouseConnector implements Connector {
             selectClause = sj.toString();
         }
 
-        String fromClause = quoteIdentifier(database) + "." + quoteIdentifier(table);
         StringBuilder sql = new StringBuilder("SELECT ").append(selectClause).append(" FROM ").append(fromClause);
 
         int rowLimit = request.rowLimit();

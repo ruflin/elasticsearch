@@ -41,6 +41,41 @@ class ClickHouseResultCursor implements ResultCursor {
         this.page = parseResponse(responseBody, attributes, blockFactory);
     }
 
+    private ClickHouseResultCursor(Page page) {
+        this.page = page;
+    }
+
+    /**
+     * Builds a cursor for a count-only query whose response is {@code [[N]]} (single aggregate column,
+     * single value). Emits a positions-only {@link Page} with {@code N} positions and no blocks, which
+     * is how ES|QL represents "this many rows, no column data" for an ungrouped {@code COUNT(*)}.
+     */
+    static ClickHouseResultCursor forRowCount(InputStream responseBody, BlockFactory blockFactory) throws IOException {
+        long count = parseSingleLong(responseBody);
+        if (count <= 0) {
+            return new ClickHouseResultCursor((Page) null);
+        }
+        return new ClickHouseResultCursor(new Page(Math.toIntExact(count)));
+    }
+
+    private static long parseSingleLong(InputStream responseBody) throws IOException {
+        try (JsonParser parser = JSON_FACTORY.createParser(responseBody)) {
+            if (parser.nextToken() != JsonToken.START_ARRAY) {
+                throw new IOException("Expected JSON array from ClickHouse count response");
+            }
+            if (parser.nextToken() != JsonToken.START_ARRAY) {
+                throw new IOException("Expected nested JSON array from ClickHouse count response");
+            }
+            parser.nextToken();
+            long value = parser.getValueAsLong();
+            // Drain the remaining tokens so the parser leaves the stream in a consistent state.
+            while (parser.nextToken() != null) {
+                // no-op
+            }
+            return value;
+        }
+    }
+
     @Override
     public boolean hasNext() {
         return page != null;

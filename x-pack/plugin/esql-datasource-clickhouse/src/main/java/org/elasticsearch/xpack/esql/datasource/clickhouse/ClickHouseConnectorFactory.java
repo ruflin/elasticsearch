@@ -21,6 +21,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitProvider;
 
 import java.io.IOException;
 import java.net.URI;
@@ -91,6 +92,13 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
     @Override
     public Connector open(Map<String, Object> config) {
         return new ClickHouseConnector(config);
+    }
+
+    @Override
+    public SplitProvider splitProvider() {
+        // Emit a single split so the planner schedules connector execution (required for ungrouped
+        // aggregates like STATS COUNT(*); the default SplitProvider.SINGLE emits none).
+        return new ClickHouseSplitProvider();
     }
 
     private List<Attribute> fetchSchema(ParsedUri parsed, String user, String password) {
