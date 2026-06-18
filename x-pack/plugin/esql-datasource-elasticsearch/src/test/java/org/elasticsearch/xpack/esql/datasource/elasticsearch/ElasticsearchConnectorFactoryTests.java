@@ -200,6 +200,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals("FROM logs | WHERE `count` > 10 | KEEP `count`", ElasticsearchConnector.buildRemoteQuery(request));
@@ -228,6 +229,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals("FROM logs | WHERE `count` > 10 | LIMIT 3", ElasticsearchConnector.buildRemoteQuery(request));
@@ -246,6 +248,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals(
@@ -267,6 +270,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals("FROM logs | STATS `c` = COUNT(*) | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
@@ -295,6 +299,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals("FROM logs | WHERE `count` > 10 | STATS `c` = COUNT(*)", ElasticsearchConnector.buildRemoteQuery(request));
@@ -313,6 +318,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(RemoteAggregate.of("c", "COUNT", null), RemoteAggregate.of("mx", "MAX", "bytes")),
             List.of(RemoteGrouping.ofField("data_stream.type")),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals(
@@ -334,6 +340,7 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
             List.of(RemoteAggregate.of("c", "COUNT", null)),
             List.of(RemoteGrouping.ofField("service.name")),
             false,
+            FormatReader.NO_SAMPLE,
             null
         );
         assertEquals(
@@ -346,6 +353,41 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         var request = new QueryRequest("logs | DROP age", List.of(), List.of(), Map.of(), 1000, null);
         IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> ElasticsearchConnector.buildRemoteQuery(request));
         assertTrue(e.getMessage().contains("illegal character"));
+    }
+
+    public void testBuildRemoteQueryPushesSampleAfterFilterBeforeLimit() {
+        Expression filter = new GreaterThan(
+            Source.EMPTY,
+            new FieldAttribute(
+                Source.EMPTY,
+                "count",
+                new EsField("count", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE)
+            ),
+            new Literal(Source.EMPTY, 10, DataType.INTEGER),
+            null
+        );
+        var request = new QueryRequest(
+            "logs",
+            List.of(),
+            List.of(),
+            Map.of(),
+            1000,
+            5,
+            List.of(filter),
+            List.of(),
+            List.of(),
+            List.of(),
+            false,
+            0.2,
+            null
+        );
+        // SAMPLE is rendered after WHERE and before LIMIT so the random draw is over the matching set on the remote.
+        assertEquals("FROM logs | WHERE `count` > 10 | SAMPLE 0.2 | LIMIT 5", ElasticsearchConnector.buildRemoteQuery(request));
+    }
+
+    public void testSamplePushdownSupported() {
+        // The remote source speaks ES|QL, so SAMPLE is pushed down (the optimizer removes the local SampleExec).
+        assertTrue(new ElasticsearchConnectorFactory().samplePushdownSupported());
     }
 
 }

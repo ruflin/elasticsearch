@@ -112,10 +112,13 @@ public class PushConnectorStatsToExternalSource extends PhysicalOptimizerRules.P
         }
         // The remote aggregate runs over the rows the remote scan produces. Pushed filters are safe because the
         // connector renders them before STATS, but a pushed sort/limit on the same source would change the row set
-        // the aggregate sees relative to the surviving plan.
+        // the aggregate sees relative to the surviving plan. A pushed SAMPLE likewise changes the input set; the
+        // SAMPLE-then-STATS combination (aggregate over a sampled subset) is not rendered as a single remote query
+        // yet, so decline here and let the local aggregate run over the (remotely-sampled) rows.
         if (ext.pushedSort().isEmpty() == false
             || ext.pushedLimit() != FormatReader.NO_LIMIT
-            || ext.pushedAggregates().isEmpty() == false) {
+            || ext.pushedAggregates().isEmpty() == false
+            || ext.pushedSample() != FormatReader.NO_SAMPLE) {
             return aggregateExec;
         }
         // Fields of a looked-through Eval, keyed by output name (empty when the aggregate sits directly over the

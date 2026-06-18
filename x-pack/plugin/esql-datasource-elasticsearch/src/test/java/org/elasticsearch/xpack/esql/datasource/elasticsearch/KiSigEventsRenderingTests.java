@@ -15,6 +15,7 @@ import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.BytesRefBlock;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.type.DataType;
+import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
@@ -68,6 +69,17 @@ public class KiSigEventsRenderingTests extends ESTestCase {
         List<RemoteAggregate> pushedAggregates,
         List<RemoteGrouping> pushedGroupings
     ) {
+        return request(projectedColumns, rowLimit, pushedSort, pushedAggregates, pushedGroupings, FormatReader.NO_SAMPLE);
+    }
+
+    private static QueryRequest request(
+        List<String> projectedColumns,
+        int rowLimit,
+        List<RemoteSort> pushedSort,
+        List<RemoteAggregate> pushedAggregates,
+        List<RemoteGrouping> pushedGroupings,
+        double pushedSampleProbability
+    ) {
         return new QueryRequest(
             TARGET,
             projectedColumns,
@@ -80,6 +92,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
             pushedAggregates,
             pushedGroupings,
             false,
+            pushedSampleProbability,
             null
         );
     }
@@ -251,5 +264,39 @@ public class KiSigEventsRenderingTests extends ESTestCase {
             BytesRefBlock bytesRefBlock = (BytesRefBlock) block;
             assertThat(bytesRefBlock.getBytesRef(0, new BytesRef()).utf8ToString(), equalTo(json));
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // SAMPLE pushdown: a pushed SAMPLE renders as a remote ` | SAMPLE <p>` so the remote draws the random sample
+    // over the full dataset. SAMPLE sits after WHERE and before SORT/KEEP/LIMIT. KI document sampling depends on
+    // this drawing from the whole corpus rather than a locally-fetched page.
+    // ---------------------------------------------------------------------------------------------------------
+
+    public void testSampleProbabilityRenders() {
+        // FROM logs | SAMPLE 0.1 — a plain pushed sample with no other pushdown.
+        String query = ElasticsearchConnector.buildRemoteQuery(request(List.of(), -1, List.of(), List.of(), List.of(), 0.1));
+        assertThat(query, equalTo("FROM logs | SAMPLE 0.1"));
+    }
+
+    public void testSampleRendersAfterProjectionAndBeforeLimit() {
+        // SAMPLE comes after WHERE (none here) and before KEEP/LIMIT: FROM logs | SAMPLE p | KEEP ... | LIMIT n.
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(List.of("@timestamp", "message"), 50, List.of(), List.of(), List.of(), 0.25)
+        );
+        assertThat(query, equalTo("FROM logs | SAMPLE 0.25 | KEEP `@timestamp`, `message` | LIMIT 50"));
+    }
+
+    public void testSampleProbabilityRendersLocaleIndependently() {
+        // The probability is rendered with Double.toString so a comma-decimal locale cannot corrupt it.
+        String query = ElasticsearchConnector.buildRemoteQuery(request(List.of(), -1, List.of(), List.of(), List.of(), 0.001));
+        assertThat(query, equalTo("FROM logs | SAMPLE 0.001"));
+    }
+
+    public void testNoSampleOptionWhenNotPushed() {
+        // The NO_SAMPLE sentinel (the default) must never emit a SAMPLE stage.
+        String query = ElasticsearchConnector.buildRemoteQuery(
+            request(List.of(), -1, List.of(), List.of(), List.of(), FormatReader.NO_SAMPLE)
+        );
+        assertThat(query, not(containsString("SAMPLE")));
     }
 }

@@ -41,6 +41,13 @@ import java.util.Map;
  *        block per aggregate. Set by the planner from the aggregate's {@code AggregatorMode}: external-source
  *        STATS is planned as {@code FINAL(INITIAL(source))}, so the pushed source sits in the {@code INITIAL}
  *        position and must produce intermediate state. Never serialized, coordinator-only.
+ * @param pushedSampleProbability row-keep probability in {@code (0, 1)} the optimizer asked the connector to
+ *        apply remotely (an ES|QL {@code SAMPLE}). {@link FormatReader#NO_SAMPLE} ({@code 1.0}) means no sample
+ *        was pushed. Connectors that natively understand ESQL sampling (e.g. the elasticsearch connector) render
+ *        this into a remote {@code SAMPLE}; everyone else ignores it. Pushing replaces the local {@code SampleExec}
+ *        (see {@code PushSampleToExternalSource}), so a connector that ignores this would under-sample — only the
+ *        elasticsearch connector, which reports the capability, ever receives a non-default value. Never
+ *        serialized, coordinator-only.
  */
 public record QueryRequest(
     String target,
@@ -54,6 +61,7 @@ public record QueryRequest(
     List<RemoteAggregate> pushedAggregates,
     List<RemoteGrouping> pushedGroupings,
     boolean aggregateIntermediateState,
+    double pushedSampleProbability,
     BlockFactory blockFactory
 ) {
 
@@ -87,6 +95,7 @@ public record QueryRequest(
             List.of(),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             blockFactory
         );
     }
@@ -112,6 +121,7 @@ public record QueryRequest(
             List.of(),
             List.of(),
             false,
+            FormatReader.NO_SAMPLE,
             blockFactory
         );
     }
@@ -129,6 +139,7 @@ public record QueryRequest(
             pushedAggregates,
             pushedGroupings,
             aggregateIntermediateState,
+            pushedSampleProbability,
             blockFactory
         );
     }
@@ -136,8 +147,8 @@ public record QueryRequest(
     /**
      * Builds a connector {@link QueryRequest} from a {@link SourceOperatorContext}, forwarding the
      * pushdown fields ({@code pushedSort}, {@code pushedAggregates}, {@code pushedGroupings},
-     * {@code aggregateIntermediateState}) that exist on both records. The {@code target} and
-     * {@code projectedColumns} are derived by the caller from the context's config / split.
+     * {@code aggregateIntermediateState}, {@code pushedSampleProbability}) that exist on both records.
+     * The {@code target} and {@code projectedColumns} are derived by the caller from the context's config / split.
      */
     public static QueryRequest forConnector(String target, List<String> projectedColumns, SourceOperatorContext context) {
         return new QueryRequest(
@@ -152,6 +163,7 @@ public record QueryRequest(
             context.pushedAggregates(),
             context.pushedGroupings(),
             context.aggregateIntermediateState(),
+            context.pushedSampleProbability(),
             null
         );
     }

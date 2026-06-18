@@ -2012,6 +2012,7 @@ public class LocalExecutionPlanner {
             .pushedAggregates(externalSource.pushedAggregates())
             .pushedGroupings(externalSource.pushedGroupings())
             .aggregateIntermediateState(externalSource.pushedAggregateIntermediate())
+            .pushedSampleProbability(externalSource.pushedSample())
             .fileList(fileList)
             .schemaMap(externalSource.schemaMap())
             .partitionColumnNames(virtualColumnNames)

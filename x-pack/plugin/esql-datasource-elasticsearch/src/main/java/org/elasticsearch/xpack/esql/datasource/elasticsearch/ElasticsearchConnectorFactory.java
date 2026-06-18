@@ -121,6 +121,14 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     @Override
+    public boolean samplePushdownSupported() {
+        // The remote source speaks ES|QL, so a pushed SAMPLE is re-rendered into a remote SAMPLE and applied
+        // server-side, drawing the random sample over the full remote dataset instead of over the rows the
+        // connector would otherwise materialize locally.
+        return true;
+    }
+
+    @Override
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
         validateConfig(location, config);
         Endpoint endpoint = parseLocation(location);

@@ -119,6 +119,21 @@ public interface ExternalSourceFactory {
     }
 
     /**
+     * Whether this factory's sources can apply a pushed {@code SAMPLE} (random row keep) remotely.
+     * <p>
+     * Only sources that natively understand ESQL sampling and execute it server-side — e.g. the elasticsearch
+     * connector, which renders the sample into the remote {@code _query} so the remote draws over the full
+     * dataset — should return {@code true}. File-based sources and connectors that stream every row must return
+     * {@code false} (the default); for them the enclosing {@code SampleExec} samples the materialized rows. A
+     * {@code true} here is a promise that, given the pushed probability, the source returns an independently
+     * sampled row set, because {@code PushSampleToExternalSource} removes the local {@code SampleExec} when it
+     * pushes (so a source that silently ignored the probability would return the full, unsampled set).
+     */
+    default boolean samplePushdownSupported() {
+        return false;
+    }
+
+    /**
      * Whether this factory resolves wildcard/multi-target patterns itself rather than via local glob
      * expansion over a {@link StorageProvider}.
      * <p>

@@ -533,6 +533,13 @@ public final class DataSourceModule implements Closeable {
             return resolveDelegate().aggregatePushdownSupported();
         }
 
+        @Override
+        public boolean samplePushdownSupported() {
+            // Same contract as sortPushdownSupported(): consulted during optimization of a query that is about
+            // to execute against this connector, so resolving the delegate here causes no extra eager loading.
+            return resolveDelegate().samplePushdownSupported();
+        }
+
         private ConnectorFactory resolveDelegate() {
             if (delegate == null) {
                 synchronized (this) {

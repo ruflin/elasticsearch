@@ -78,4 +78,13 @@ public record ExternalOptimizerContext(FormatReaderRegistry formatReaderRegistry
         ExternalSourceFactory factory = factoryFor(sourceType);
         return factory != null && factory.aggregatePushdownSupported();
     }
+
+    /**
+     * Returns {@code true} when the connector for {@code sourceType} supports sample pushdown.
+     * Convenience over {@link #factoryFor(String)} + {@link ExternalSourceFactory#samplePushdownSupported()}.
+     */
+    public boolean samplePushdownSupported(String sourceType) {
+        ExternalSourceFactory factory = factoryFor(sourceType);
+        return factory != null && factory.samplePushdownSupported();
+    }
 }
