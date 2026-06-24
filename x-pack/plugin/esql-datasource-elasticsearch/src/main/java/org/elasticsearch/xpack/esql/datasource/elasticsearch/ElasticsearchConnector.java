@@ -37,7 +37,6 @@ import org.elasticsearch.xpack.esql.datasources.spi.Split;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -58,14 +57,6 @@ class ElasticsearchConnector implements Connector {
     ElasticsearchConnector(RestClient client) {
         this.client = client;
     }
-
-    /**
-     * Upper bound on how many characters of the remote error body are included in a surfaced error
-     * message. Remote ES|QL errors (a {@code root_cause}/{@code reason} JSON object) are small, but a
-     * misconfigured remote could return an unbounded HTML error page or stack trace; truncating keeps
-     * the message useful for debugging without flooding logs or the API response.
-     */
-    static final int MAX_ERROR_BODY_CHARS = 2048;
 
     @Override
     public ResultCursor execute(QueryRequest request, Split split) {
@@ -95,7 +86,7 @@ class ElasticsearchConnector implements Connector {
     private static RuntimeException remoteErrorException(String esqlQuery, ResponseException e) {
         int statusCode = e.getResponse().getStatusLine().getStatusCode();
         String statusLine = e.getResponse().getStatusLine().toString();
-        return remoteError(statusCode, statusLine, errorBodySnippet(e.getResponse()), esqlQuery, e);
+        return remoteError(statusCode, statusLine, RemoteErrorSnippets.snippet(e.getResponse()), esqlQuery, e);
     }
 
     /**
@@ -108,28 +99,6 @@ class ElasticsearchConnector implements Connector {
     static RuntimeException remoteError(int statusCode, String statusLine, String bodySnippet, String esqlQuery, Throwable cause) {
         String message = "Remote ES|QL query failed with [" + statusLine + "]: " + bodySnippet + " (query [" + esqlQuery + "])";
         return statusCode >= 500 ? new ExternalServerException(message, cause) : new ExternalClientException(message, cause);
-    }
-
-    /**
-     * Reads the remote error response body as a bounded, single-line snippet for inclusion in an error message.
-     * Returns a placeholder when the body is absent or cannot be read, so error reporting never throws while
-     * reporting an error.
-     */
-    private static String errorBodySnippet(Response response) {
-        if (response.getEntity() == null) {
-            return "<no response body>";
-        }
-        try (InputStream content = response.getEntity().getContent()) {
-            return truncateErrorBody(new String(content.readNBytes(MAX_ERROR_BODY_CHARS), StandardCharsets.UTF_8));
-        } catch (IOException ioe) {
-            return "<unreadable response body: " + ioe.getMessage() + ">";
-        }
-    }
-
-    /** Collapses whitespace and trims a remote error body into a compact single-line snippet for an error message. */
-    static String truncateErrorBody(String body) {
-        String text = body == null ? "" : body.strip().replaceAll("\\s+", " ");
-        return text.isEmpty() ? "<empty response body>" : text;
     }
 
     /**

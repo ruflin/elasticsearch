@@ -50,18 +50,18 @@ public class ElasticsearchConnectorTests extends ESTestCase {
     }
 
     public void testTruncateErrorBodyCollapsesWhitespace() {
-        assertEquals("a b c", ElasticsearchConnector.truncateErrorBody("  a\n  b\t c \n"));
+        assertEquals("a b c", RemoteErrorSnippets.truncate("  a\n  b\t c \n"));
     }
 
     public void testTruncateErrorBodyHandlesNullAndEmpty() {
-        assertEquals("<empty response body>", ElasticsearchConnector.truncateErrorBody(null));
-        assertEquals("<empty response body>", ElasticsearchConnector.truncateErrorBody("   \n\t "));
+        assertEquals("<empty response body>", RemoteErrorSnippets.truncate(null));
+        assertEquals("<empty response body>", RemoteErrorSnippets.truncate("   \n\t "));
     }
 
     public void testRemoteErrorBodyTruncationBound() {
         // The body snippet the message carries should never exceed the connector's documented bound; this guards
         // against a misconfigured remote returning a huge HTML error page. The reader caps the bytes it reads, so
         // here we assert the bound itself is sane and applied by the caller via readNBytes(MAX_ERROR_BODY_CHARS).
-        assertEquals(2048, ElasticsearchConnector.MAX_ERROR_BODY_CHARS);
+        assertEquals(2048, RemoteErrorSnippets.MAX_ERROR_BODY_CHARS);
     }
 }

@@ -39,7 +39,6 @@ import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -149,7 +148,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
                     + "]: remote returned ["
                     + e.getResponse().getStatusLine()
                     + "]: "
-                    + remoteErrorSnippet(e.getResponse()),
+                    + RemoteErrorSnippets.snippet(e.getResponse()),
                 e
             );
         } catch (IOException e) {
@@ -280,27 +279,6 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         }
         return EsqlTypeMapping.toAttributes(columns);
     }
-
-    /**
-     * Reads the remote error response body as a bounded, single-line snippet for inclusion in a schema-resolution
-     * error message. Returns a placeholder when the body is absent or cannot be read, so error reporting never
-     * throws while reporting an error.
-     */
-    private static String remoteErrorSnippet(Response response) {
-        if (response.getEntity() == null) {
-            return "<no response body>";
-        }
-        try (InputStream content = response.getEntity().getContent()) {
-            byte[] bytes = content.readNBytes(MAX_ERROR_BODY_CHARS);
-            String text = new String(bytes, StandardCharsets.UTF_8).strip().replaceAll("\\s+", " ");
-            return text.isEmpty() ? "<empty response body>" : text;
-        } catch (IOException ioe) {
-            return "<unreadable response body: " + ioe.getMessage() + ">";
-        }
-    }
-
-    /** Upper bound on remote error-body characters included in a schema-resolution error message. */
-    static final int MAX_ERROR_BODY_CHARS = 2048;
 
     /**
      * Parses {@code es://host:port/index} into a base URL and target index.
