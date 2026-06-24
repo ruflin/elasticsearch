@@ -41,10 +41,10 @@ set -euo pipefail
 # --------------------------------------------------------------------------------------------------
 # Configuration (override via environment variables)
 # --------------------------------------------------------------------------------------------------
-ES_SOURCE_PATH="${ES_SOURCE_PATH:-/Users/ruflin/Dev/elastic/elasticsearch}"
-KIBANA_PATH="${KIBANA_PATH:-/Users/ruflin/Dev/elastic/kibana}"
-KIBANA_CONFIG="${KIBANA_CONFIG:-/Users/ruflin/Dev/elastic/kibana/config/kibana.dev.yml}"
-GCS_CREDENTIALS_FILE="${GCS_CREDENTIALS_FILE:-/Users/ruflin/Dev/elastic/gcs-credentials.json}"
+ES_SOURCE_PATH="${ES_SOURCE_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+KIBANA_PATH="${KIBANA_PATH:-$(cd "${ES_SOURCE_PATH}/../kibana" 2>/dev/null && pwd || echo "${ES_SOURCE_PATH}/../kibana")}"
+KIBANA_CONFIG="${KIBANA_CONFIG:-${KIBANA_PATH}/config/kibana.dev.yml}"
+GCS_CREDENTIALS_FILE="${GCS_CREDENTIALS_FILE:-${ES_SOURCE_PATH}/../gcs-credentials.json}"
 
 # Primary ES (from source) — reached by Kibana and where the data source/dataset live.
 PRIMARY_HOST="${PRIMARY_HOST:-http://localhost:9200}"
@@ -86,7 +86,7 @@ USE_EIS="${USE_EIS:-0}"
 # project encryption key (PEK), which the master only installs once a wrapping password is present in
 # the keystore. `yarn es source` cannot inject keystore string values, so we add them to the running
 # install's keystore and reload secure settings. ES_INSTALL_PATH is where `yarn es source` installs.
-ES_INSTALL_PATH="${ES_INSTALL_PATH:-/Users/ruflin/Dev/elastic/kibana/.es/source}"
+ES_INSTALL_PATH="${ES_INSTALL_PATH:-${KIBANA_PATH}/.es/source}"
 ENCRYPTION_PASSWORD_ID="${ENCRYPTION_PASSWORD_ID:-demo}"
 ENCRYPTION_PASSWORD="${ENCRYPTION_PASSWORD:-esql-datasource-demo-password}"
 
