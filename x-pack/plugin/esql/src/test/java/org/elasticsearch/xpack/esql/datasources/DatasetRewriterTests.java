@@ -224,7 +224,7 @@ public class DatasetRewriterTests extends ESTestCase {
             IndexMode.STANDARD,
             null
         );
-        LogicalPlan rewritten = DatasetRewriter.rewrite(relation, project, RESOLVER);
+        LogicalPlan rewritten = rewrite(relation, project);
         assertThat(rewritten, instanceOf(UnresolvedExternalRelation.class));
         UnresolvedExternalRelation out = (UnresolvedExternalRelation) rewritten;
         assertThat(out.metadataFields(), hasSize(2));
