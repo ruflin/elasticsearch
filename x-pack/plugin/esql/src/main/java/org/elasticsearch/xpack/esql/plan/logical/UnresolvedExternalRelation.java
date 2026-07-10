@@ -185,6 +185,7 @@ public final class UnresolvedExternalRelation extends LeafPlan implements Unreso
     public DatasetMapping mapping() {
         return mapping;
     }
+
     @Override
     public boolean resolved() {
         return false;

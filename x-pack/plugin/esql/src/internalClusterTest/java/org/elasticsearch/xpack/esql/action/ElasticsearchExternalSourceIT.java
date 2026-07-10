@@ -8,7 +8,6 @@
 package org.elasticsearch.xpack.esql.action;
 
 import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.cluster.metadata.DatasetMetadata;
 import org.elasticsearch.common.network.NetworkModule;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.IOUtils;
@@ -37,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.DATASET_IN_FROM_COMMAND;
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
 import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
 import static org.hamcrest.Matchers.equalTo;
@@ -101,8 +101,8 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
                 ESIntegTestCase.TestSeedPlugin.class,
                 MockTransportService.TestPlugin.class,
                 getTestTransportPlugin(),
-                EsqlPluginWithEnterpriseOrTrialLicense.class,
-                TestEncryptionServicePlugin.class
+                TestEncryptionServicePlugin.class,
+                EsqlPluginWithEnterpriseOrTrialLicense.class
             ),
             Function.identity(),
             TEST_ENTITLEMENTS::addEntitledNodePaths
@@ -134,7 +134,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
 
     public void testPutDataSourceAcceptsElasticsearchType() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
-        assumeTrue("requires external data sources feature flag", DatasetMetadata.ESQL_EXTERNAL_DATASOURCES_FEATURE_FLAG.isEnabled());
+        assumeTrue("requires dataset-in-from-command capability", DATASET_IN_FROM_COMMAND.isEnabled());
 
         TimeValue timeout = TimeValue.timeValueSeconds(10);
         String name = "test_es_connector_ds";

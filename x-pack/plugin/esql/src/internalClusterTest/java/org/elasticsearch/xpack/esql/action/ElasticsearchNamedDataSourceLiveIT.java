@@ -7,7 +7,6 @@
 
 package org.elasticsearch.xpack.esql.action;
 
-import org.elasticsearch.cluster.metadata.DatasetMetadata;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.xpack.esql.datasources.dataset.DeleteDatasetAction;
@@ -19,6 +18,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.DATASET_IN_FROM_COMMAND;
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.EXTERNAL_COMMAND;
 import static org.elasticsearch.xpack.esql.action.EsqlQueryRequest.syncEsqlQueryRequest;
 import static org.hamcrest.Matchers.equalTo;
@@ -51,7 +51,7 @@ public class ElasticsearchNamedDataSourceLiveIT extends AbstractElasticsearchLiv
     public void testNamedDataSourceMatchesDirect() throws Exception {
         assumeTrue("requires a configured remote (tests.esql.remote.url)", URL != null);
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
-        assumeTrue("requires external data sources feature flag", DatasetMetadata.ESQL_EXTERNAL_DATASOURCES_FEATURE_FLAG.isEnabled());
+        assumeTrue("requires dataset-in-from-command capability", DATASET_IN_FROM_COMMAND.isEnabled());
 
         String dataSourceName = "live_remote_ds";
         String datasetName = "live_remote_logs";
