@@ -34,6 +34,14 @@ public class EsqlIdentifiersTests extends ESTestCase {
         assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget("logs\nmore"));
     }
 
+    public void testValidateTargetRejectsWhitespace() {
+        // A percent-encoded space in the location's path decodes to a plain space, which would append a clause to
+        // the rendered FROM (e.g. "FROM logs METADATA _id") and change what the remote returns.
+        assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget("logs METADATA _id"));
+        assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget("logs\tmore"));
+        assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget("logs, metrics"));
+    }
+
     public void testValidateTargetRejectsEmpty() {
         assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget(""));
         assertThrows(IllegalArgumentException.class, () -> EsqlIdentifiers.validateTarget(null));

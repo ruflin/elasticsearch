@@ -34,6 +34,11 @@ final class EsqlIdentifiers {
      * {@code es://host:9200/x | DROP ...} could inject ES|QL. An index/data-stream/alias selector is
      * a comma-separated list of name patterns; we reject the structural ES|QL characters (quotes,
      * backticks, pipes) and control characters that would let a value escape the {@code FROM} clause.
+     * <p>
+     * Whitespace is rejected too. Elasticsearch index names cannot contain spaces, so no legitimate
+     * target needs them, and allowing them would let a percent-encoded space in the URI path append a
+     * clause to the rendered {@code FROM} — {@code es://host/logs%20METADATA%20_id} would decode to
+     * {@code FROM logs METADATA _id} and silently change what the remote returns.
      */
     static String validateTarget(String target) {
         if (target == null || target.isEmpty()) {
@@ -41,7 +46,7 @@ final class EsqlIdentifiers {
         }
         for (int i = 0; i < target.length(); i++) {
             char c = target.charAt(i);
-            if (c == '"' || c == '`' || c == '|' || c == '\\' || c < ' ') {
+            if (c == '"' || c == '`' || c == '|' || c == '\\' || c < ' ' || Character.isWhitespace(c)) {
                 throw new IllegalArgumentException(
                     "Invalid Elasticsearch connector target [" + target + "]: illegal character at position " + i
                 );

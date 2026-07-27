@@ -18,6 +18,7 @@ import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.InternalTestCluster;
 import org.elasticsearch.test.NodeConfigurationSource;
 import org.elasticsearch.test.transport.MockTransportService;
+import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
 import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.GetDataSourceAction;
@@ -158,10 +159,10 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         }
     }
 
-    // The filter/limit assertions below verify end-to-end correctness with pushdown enabled. They do
-    // not by themselves prove the WHERE/LIMIT was executed remotely: the local FilterExec/LimitExec
-    // safety nets would make the same assertions pass even without pushdown. buildRemoteQuery unit
-    // tests cover the remote-query string; proving remote execution (request capture) is a follow-up.
+    // The filter/limit assertions below verify end-to-end correctness with pushdown enabled. They do not by
+    // themselves prove the WHERE/LIMIT was executed remotely: the local LimitExec safety net (and, when a conjunct
+    // is left unpushed, the FilterExec) would make the same assertions pass anyway. That the pushed clauses reach
+    // the remote HTTP request is asserted separately by the connector module's RemoteRequestCaptureTests.
 
     public void testFilterWithPushdownEnabledReturnsSubset() throws Exception {
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
@@ -240,9 +241,7 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
     }
 
     private void indexRemoteDoc(String index, String id, String source) {
-        remoteCluster.client()
-            .index(new IndexRequest(index).id(id).source(source, org.elasticsearch.xcontent.XContentType.JSON))
-            .actionGet();
+        remoteCluster.client().index(new IndexRequest(index).id(id).source(source, XContentType.JSON)).actionGet();
     }
 
     private String remoteHttpAddress() {

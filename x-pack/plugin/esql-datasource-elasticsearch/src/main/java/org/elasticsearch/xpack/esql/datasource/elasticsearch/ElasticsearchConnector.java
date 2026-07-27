@@ -16,6 +16,8 @@ import org.elasticsearch.compute.data.Block;
 import org.elasticsearch.compute.data.BlockFactory;
 import org.elasticsearch.compute.data.ElementType;
 import org.elasticsearch.compute.data.Page;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -42,6 +44,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.function.BiConsumer;
 
 /**
  * Live connection to a remote Elasticsearch cluster. Runs an ES|QL query against the remote
@@ -52,6 +55,8 @@ import java.util.NoSuchElementException;
  */
 class ElasticsearchConnector implements Connector {
 
+    private static final Logger logger = LogManager.getLogger(ElasticsearchConnector.class);
+
     private final RestClient client;
 
     ElasticsearchConnector(RestClient client) {
@@ -61,6 +66,10 @@ class ElasticsearchConnector implements Connector {
     @Override
     public ResultCursor execute(QueryRequest request, Split split) {
         String esqlQuery = buildRemoteQuery(request);
+        // The rendered query carries the target and every pushed filter/aggregate literal, so it is only ever
+        // logged at DEBUG on the coordinator and never put into an exception message (which travels back to the
+        // caller and into the audit trail). See remoteError().
+        logger.debug("running remote ES|QL query [{}]", esqlQuery);
         Response response;
         try {
             response = client.performRequest(RemoteQuery.request(esqlQuery));
@@ -70,10 +79,10 @@ class ElasticsearchConnector implements Connector {
             // remote status and a bounded snippet of its error body so the failure is actionable instead of an
             // opaque "failed to run" string, and map the status class through so a remote 5xx is not mislabeled
             // as a client (400) error.
-            throw remoteErrorException(esqlQuery, e);
+            throw remoteErrorException(e);
         } catch (IOException e) {
             // A transport-level failure (connection refused, timeout, TLS, DNS): no remote status to forward.
-            throw new UncheckedIOException("Failed to run remote ES|QL query [" + esqlQuery + "]", e);
+            throw new UncheckedIOException("Failed to run remote ES|QL query", e);
         }
         return parseResponse(response, request);
     }
@@ -83,21 +92,25 @@ class ElasticsearchConnector implements Connector {
      * {@link ResponseException} and delegating to {@link #remoteError}. Kept thin so the message/status-mapping
      * logic in {@link #remoteError} stays unit-testable without constructing a (package-private) {@link Response}.
      */
-    private static RuntimeException remoteErrorException(String esqlQuery, ResponseException e) {
+    private static RuntimeException remoteErrorException(ResponseException e) {
         int statusCode = e.getResponse().getStatusLine().getStatusCode();
         String statusLine = e.getResponse().getStatusLine().toString();
-        return remoteError(statusCode, statusLine, RemoteErrorSnippets.snippet(e.getResponse()), esqlQuery, e);
+        return remoteError(statusCode, statusLine, RemoteErrorSnippets.snippet(e.getResponse()), e);
     }
 
     /**
      * Maps a remote non-2xx response to the matching external-source exception: a remote {@code 5xx} becomes an
      * {@link ExternalServerException} (500) and anything else (a {@code 4xx} client error such as a bad pushed
      * query or a permissions failure) becomes an {@link ExternalClientException} (400). The message carries the
-     * remote status line and a snippet of the remote error body plus the rendered ES|QL that was rejected, so the
-     * failure is actionable instead of an opaque "failed to run" string.
+     * remote status line and a snippet of the remote error body, so the failure is actionable instead of an opaque
+     * "failed to run" string.
+     * <p>
+     * The rendered ES|QL is deliberately <em>not</em> in the message. It contains the resolved target and every
+     * pushed filter/aggregate literal, and this message is returned to the caller and recorded in logs; the query
+     * is available at DEBUG on the coordinator instead.
      */
-    static RuntimeException remoteError(int statusCode, String statusLine, String bodySnippet, String esqlQuery, Throwable cause) {
-        String message = "Remote ES|QL query failed with [" + statusLine + "]: " + bodySnippet + " (query [" + esqlQuery + "])";
+    static RuntimeException remoteError(int statusCode, String statusLine, String bodySnippet, Throwable cause) {
+        String message = "Remote ES|QL query failed with [" + statusLine + "]: " + bodySnippet;
         return statusCode >= 500 ? new ExternalServerException(message, cause) : new ExternalClientException(message, cause);
     }
 
@@ -115,10 +128,16 @@ class ElasticsearchConnector implements Connector {
      * Stage order is {@code FROM | WHERE | SAMPLE | SORT | KEEP | LIMIT}: SAMPLE runs after WHERE so the sample is
      * drawn from the matching rows, and before SORT/LIMIT so the limit keeps a sampled top-N. SORT runs before KEEP
      * so a sort key dropped by the projection is still available when the remote sorts, and before LIMIT so the
-     * limit keeps the top-N rather than the first page. The local plan keeps a safety-net {@code FilterExec}/
-     * {@code TopNExec}/{@code LimitExec} above the source for filter/sort/limit, so an over- or under-rendered
-     * pushdown of those can never produce wrong results. SAMPLE is the exception: {@code PushSampleToExternalSource}
-     * removes the local {@code SampleExec} (to avoid double-sampling), so the remote {@code SAMPLE} is authoritative.
+     * limit keeps the top-N rather than the first page.
+     * <p>
+     * <b>Which stages have a local safety net.</b> SORT and LIMIT do: {@code PushSortToExternalSource} and
+     * {@code PushLimitToExternalSource} leave the {@code TopNExec}/{@code LimitExec} in place, so an over- or
+     * under-rendered sort/limit cannot produce wrong results. WHERE, SAMPLE, and STATS do <em>not</em>:
+     * {@code PushFiltersToSource} drops the {@code FilterExec} when every conjunct was pushed (only an unpushed
+     * remainder keeps it), {@code PushSampleToExternalSource} removes the {@code SampleExec} to avoid
+     * double-sampling, and {@code PushConnectorStatsToExternalSource} removes the aggregate it pushes. For those
+     * three the rendering below is authoritative and a mis-rendered clause silently changes the result — which is
+     * why {@link EsqlFilterTranslator} declines to push anything it cannot render with identical semantics.
      */
     static String buildRemoteQuery(QueryRequest request) {
         StringBuilder query = new StringBuilder("FROM ").append(EsqlIdentifiers.validateTarget(request.target()));
@@ -133,7 +152,7 @@ class ElasticsearchConnector implements Connector {
         // A pushed aggregate replaces row materialization entirely: render STATS and return aggregate output rows.
         // SORT/LIMIT may still apply to those aggregate rows (for STATS ... | SORT ... | LIMIT ...).
         List<RemoteAggregate> aggregates = request.pushedAggregates();
-        if (aggregates != null && aggregates.isEmpty() == false) {
+        if (aggregates.isEmpty() == false) {
             appendStats(query, aggregates, request.pushedGroupings());
             appendSort(query, request.pushedSort());
             appendLimit(query, request.rowLimit());
@@ -170,39 +189,24 @@ class ElasticsearchConnector implements Connector {
      * {@code METADATA} option does not accept backtick-quoted identifiers and metadata names are fixed, safe tokens.
      */
     private static void appendMetadata(StringBuilder query, QueryRequest request) {
-        List<String> projected = request.projectedColumns();
-        if (projected == null || projected.isEmpty()) {
-            return;
-        }
-        List<String> metadataColumns = new ArrayList<>();
-        for (String column : projected) {
-            if (MetadataAttribute.isSupported(column)) {
-                metadataColumns.add(column);
-            }
-        }
+        List<String> metadataColumns = request.projectedColumns().stream().filter(MetadataAttribute::isSupported).toList();
         if (metadataColumns.isEmpty()) {
             return;
         }
         query.append(" METADATA ");
-        for (int i = 0; i < metadataColumns.size(); i++) {
-            if (i > 0) {
-                query.append(", ");
-            }
-            query.append(metadataColumns.get(i));
-        }
+        appendCommaSeparated(query, metadataColumns, StringBuilder::append);
     }
 
     private static void appendSort(StringBuilder query, List<RemoteSort> sort) {
-        if (sort != null && sort.isEmpty() == false) {
+        if (sort.isEmpty() == false) {
             query.append(" | SORT ");
-            for (int i = 0; i < sort.size(); i++) {
-                if (i > 0) {
-                    query.append(", ");
-                }
-                RemoteSort s = sort.get(i);
-                query.append(EsqlIdentifiers.quote(s.field())).append(s.ascending() ? " ASC" : " DESC");
-                query.append(s.nullsFirst() ? " NULLS FIRST" : " NULLS LAST");
-            }
+            appendCommaSeparated(
+                query,
+                sort,
+                (out, s) -> out.append(EsqlIdentifiers.quote(s.field()))
+                    .append(s.ascending() ? " ASC" : " DESC")
+                    .append(s.nullsFirst() ? " NULLS FIRST" : " NULLS LAST")
+            );
         }
     }
 
@@ -213,15 +217,10 @@ class ElasticsearchConnector implements Connector {
     }
 
     private static void appendKeep(StringBuilder query, List<String> projected) {
-        if (projected != null && projected.isEmpty() == false) {
+        if (projected.isEmpty() == false) {
             query.append(" | KEEP ");
-            for (int i = 0; i < projected.size(); i++) {
-                if (i > 0) {
-                    query.append(", ");
-                }
-                // Quote like WHERE fields so dotted / special / reserved column names stay valid remote ES|QL.
-                query.append(EsqlIdentifiers.quote(projected.get(i)));
-            }
+            // Quote like WHERE fields so dotted / special / reserved column names stay valid remote ES|QL.
+            appendCommaSeparated(query, projected, (out, column) -> out.append(EsqlIdentifiers.quote(column)));
         }
     }
 
@@ -232,42 +231,50 @@ class ElasticsearchConnector implements Connector {
      */
     private static void appendStats(StringBuilder query, List<RemoteAggregate> aggregates, List<RemoteGrouping> groupings) {
         query.append(" | STATS ");
-        for (int i = 0; i < aggregates.size(); i++) {
+        appendCommaSeparated(query, aggregates, ElasticsearchConnector::appendAggregate);
+        if (groupings.isEmpty() == false) {
+            query.append(" BY ");
+            appendCommaSeparated(query, groupings, ElasticsearchConnector::appendGrouping);
+        }
+    }
+
+    private static void appendAggregate(StringBuilder query, RemoteAggregate agg) {
+        query.append(EsqlIdentifiers.quote(agg.outputName())).append(" = ").append(agg.function()).append('(');
+        if (agg.field() == null) {
+            query.append('*');
+        } else if (agg.fieldFunction() != null) {
+            // Input wrapped in a scalar function (e.g. SUM(TO_DOUBLE(`event.duration`))). The connector owns
+            // identifier quoting, so only the field is quoted; the function name is rendered verbatim.
+            query.append(agg.fieldFunction()).append('(').append(EsqlIdentifiers.quote(agg.field())).append(')');
+        } else {
+            query.append(EsqlIdentifiers.quote(agg.field()));
+        }
+        query.append(')');
+        if (agg.filter() != null) {
+            // Per-aggregate filter: COUNT(*) WHERE <already-rendered remote boolean fragment>.
+            query.append(" WHERE ").append(agg.filter());
+        }
+    }
+
+    private static void appendGrouping(StringBuilder query, RemoteGrouping grouping) {
+        // Plain field: render the quoted field reference (e.g. BY `service.name`). Computed grouping (e.g. a time
+        // BUCKET): render `out` = <already-rendered remote expression>.
+        query.append(EsqlIdentifiers.quote(grouping.outputName()));
+        if (grouping.isPlainField() == false) {
+            query.append(" = ").append(grouping.expression());
+        }
+    }
+
+    /**
+     * Appends {@code items} separated by {@code ", "}, rendering each with {@code renderer}. Shared by every
+     * list-valued clause (METADATA, SORT, KEEP, STATS, BY) so the separator handling lives in one place.
+     */
+    private static <T> void appendCommaSeparated(StringBuilder query, List<T> items, BiConsumer<StringBuilder, T> renderer) {
+        for (int i = 0; i < items.size(); i++) {
             if (i > 0) {
                 query.append(", ");
             }
-            RemoteAggregate agg = aggregates.get(i);
-            query.append(EsqlIdentifiers.quote(agg.outputName())).append(" = ").append(agg.function()).append('(');
-            if (agg.field() == null) {
-                query.append('*');
-            } else if (agg.fieldFunction() != null) {
-                // Input wrapped in a scalar function (e.g. SUM(TO_DOUBLE(`event.duration`))). The connector owns
-                // identifier quoting, so only the field is quoted; the function name is rendered verbatim.
-                query.append(agg.fieldFunction()).append('(').append(EsqlIdentifiers.quote(agg.field())).append(')');
-            } else {
-                query.append(EsqlIdentifiers.quote(agg.field()));
-            }
-            query.append(')');
-            if (agg.filter() != null) {
-                // Per-aggregate filter: COUNT(*) WHERE <already-rendered remote boolean fragment>.
-                query.append(" WHERE ").append(agg.filter());
-            }
-        }
-        if (groupings != null && groupings.isEmpty() == false) {
-            query.append(" BY ");
-            for (int i = 0; i < groupings.size(); i++) {
-                if (i > 0) {
-                    query.append(", ");
-                }
-                RemoteGrouping grouping = groupings.get(i);
-                if (grouping.isPlainField()) {
-                    // Plain field: render the quoted field reference (e.g. BY `service.name`).
-                    query.append(EsqlIdentifiers.quote(grouping.outputName()));
-                } else {
-                    // Computed grouping (e.g. a time BUCKET): render `out` = <already-rendered remote expression>.
-                    query.append(EsqlIdentifiers.quote(grouping.outputName())).append(" = ").append(grouping.expression());
-                }
-            }
+            renderer.accept(query, items.get(i));
         }
     }
 
@@ -311,9 +318,7 @@ class ElasticsearchConnector implements Connector {
             return new SinglePageCursor(null);
         }
 
-        boolean intermediateAggregateState = request.aggregateIntermediateState()
-            && request.pushedAggregates() != null
-            && request.pushedAggregates().isEmpty() == false;
+        boolean intermediateAggregateState = request.aggregateIntermediateState() && request.pushedAggregates().isEmpty() == false;
         Block[] blocks = intermediateAggregateState
             ? buildIntermediateAggregateBlocks(columns, columnValues, rowCount, blockFactory, request)
             : buildPassthroughBlocks(columns, columnValues, rowCount, blockFactory);

@@ -87,9 +87,17 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
                 || location.startsWith("elasticsearch+https://"));
     }
 
+    /**
+     * Validates a query-time config map: first the key names, then the values {@link ElasticsearchConfiguration}
+     * owns. The value check matters for the inline {@code EXTERNAL "es://..." WITH {"api_key": ...}} path, which
+     * does not go through the named data source's CRUD validator: without it an {@code api_key} containing CRLF
+     * would reach the {@code Authorization} header verbatim (Apache HttpClient 4.5.x does not strip control
+     * characters from header values), which is an HTTP request-splitting vector.
+     */
     @Override
     public void validateConfig(String location, Map<String, Object> config) {
         ConfigKeyValidator.check(config, List.of(Set.of(CONFIG_API_KEY, CONFIG_CONNECT_TIMEOUT_MILLIS, CONFIG_SOCKET_TIMEOUT_MILLIS)));
+        ElasticsearchConfiguration.fromQueryConfig(config);
     }
 
     @Override
@@ -131,8 +139,7 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
         validateConfig(location, config);
         Endpoint endpoint = parseLocation(location);
-        String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);
-        try (RestClient client = buildClient(endpoint.baseUrl(), apiKey, config)) {
+        try (RestClient client = buildClient(endpoint.baseUrl(), apiKey(config), config)) {
             List<Attribute> attributes = resolveSchema(client, endpoint.target());
             Map<String, Object> resolvedConfig = new HashMap<>();
             resolvedConfig.put(CONFIG_ENDPOINT, endpoint.baseUrl());
@@ -162,8 +169,18 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         if (baseUrl == null) {
             throw new IllegalArgumentException("Elasticsearch connector requires '" + CONFIG_ENDPOINT + "' in config");
         }
-        String apiKey = Objects.toString(config.get(CONFIG_API_KEY), null);
-        return new ElasticsearchConnector(buildClient(baseUrl, apiKey, config));
+        return new ElasticsearchConnector(buildClient(baseUrl, apiKey(config), config));
+    }
+
+    /**
+     * Reads the API key out of a config map, running {@link ElasticsearchConfiguration}'s value validation on the
+     * way. Both entry points that build a client ({@link #resolveMetadata} and {@link #open}) go through here, so
+     * a rejected value (notably a CRLF-bearing key) can never reach the {@code Authorization} header, whether it
+     * arrived from a named data source's decrypted secret or from an inline {@code WITH {"api_key": ...}}.
+     */
+    private static String apiKey(Map<String, Object> config) {
+        ElasticsearchConfiguration configuration = ElasticsearchConfiguration.fromQueryConfig(config).value();
+        return configuration == null ? null : configuration.apiKey();
     }
 
     /**

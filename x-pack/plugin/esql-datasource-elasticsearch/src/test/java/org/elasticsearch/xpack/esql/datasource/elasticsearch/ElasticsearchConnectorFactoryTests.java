@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
+import org.elasticsearch.common.ValidationException;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
 import org.elasticsearch.xpack.esql.core.expression.FieldAttribute;
@@ -22,6 +23,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
@@ -110,6 +112,29 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertTrue(e.getMessage().contains("unknown option"));
     }
 
+    public void testValidateConfigRejectsApiKeyWithLineBreaks() {
+        // The inline EXTERNAL "..." WITH {"api_key": ...} path does not go through the named data source's CRUD
+        // validator, so the connector must run the same value check: a CRLF in the key would otherwise be
+        // concatenated verbatim into the Authorization header and split the HTTP request.
+        for (String key : List.of("secret\r\nX-Injected: 1", "secret\nX-Injected: 1", "secret\r")) {
+            ValidationException e = expectThrows(
+                ValidationException.class,
+                () -> factory.validateConfig("es://remote:9200/logs", Map.of("api_key", key))
+            );
+            assertTrue(e.getMessage().contains("api_key must not contain line-break characters"));
+        }
+    }
+
+    public void testOpenRejectsApiKeyWithLineBreaks() {
+        // open() is reached without a preceding validateConfig() on the resolved-config path, so the same guard
+        // has to hold there: no CRLF value may ever reach the Authorization header.
+        ValidationException e = expectThrows(
+            ValidationException.class,
+            () -> factory.open(Map.of("endpoint", "http://remote:9200", "api_key", "secret\r\nX-Injected: 1"))
+        );
+        assertTrue(e.getMessage().contains("api_key must not contain line-break characters"));
+    }
+
     public void testParseLocationRejectsLinkLocalIpv4Literal() {
         IllegalArgumentException e = expectThrows(
             IllegalArgumentException.class,
@@ -143,15 +168,14 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         assertTrue(e.getMessage().contains("endpoint"));
     }
 
-    public void testResolvedConfigDoesNotContainApiKey() throws Exception {
-        // resolveMetadata() stores only endpoint and target in the SourceMetadata's resolvedConfig —
-        // api_key must never be carried there so that secrets are not serialised into stored metadata.
-        // Verify the invariant by confirming that open() succeeds with just the resolved keys: if the
-        // resolved config were to contain api_key, open() would work differently (it reads api_key from config).
-        // This test checks the complement: open() works without api_key, matching the resolved config shape.
-        Map<String, Object> resolvedConfig = Map.of("endpoint", "http://remote:9200");
-        try (Connector conn = factory.open(resolvedConfig)) {
+    public void testOpenSucceedsWithoutApiKey() {
+        // An anonymous remote cluster needs no credential; open() must not require one.
+        // The full resolveMetadata() -> resolved-config -> open() contract (including the invariant that the key
+        // never lands in the resolved config) is covered end-to-end by RemoteRequestCaptureTests.
+        try (Connector conn = factory.open(Map.of("endpoint", "http://remote:9200"))) {
             assertNotNull(conn);
+        } catch (IOException e) {
+            throw new AssertionError(e);
         }
     }
 
