@@ -29,28 +29,22 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
 /**
- * Characterisation tests for the remote ES|QL the connector renders for the Kibana Knowledge-Indicator (KI)
- * extraction / KI rule generation / Significant-Events (SigEvents) use cases (the {@code streams} plugin in the
- * Kibana repo, package {@code x-pack/platform/plugins/shared/streams/server/lib/sig_events}).
- *
- * <p>Those features run two canonical ES|QL query shapes against a stream's data:
+ * Pins the remote ES|QL the connector renders (and the blocks it decodes) for the two query shapes that drive
+ * alerting and significant-event detection over an external dataset:
  * <ul>
- *   <li><b>{@code match}</b> rules — {@code FROM <stream> METADATA _id, _source | WHERE ... | LIMIT N}, then read
- *       back the {@code _id} and {@code _source} columns (see Kibana {@code build_esql_search_request.ts} /
- *       {@code execute_esql_request.ts}).</li>
- *   <li><b>{@code stats}</b> histograms — {@code FROM <stream> | STATS errors = COUNT(*) WHERE <pred>,
- *       total = COUNT(*) BY bucket = BUCKET(@timestamp, 5 minutes) | EVAL rate = errors * 100.0 / total
- *       | WHERE total > N AND rate > M} (the count-over-time / error-rate shape, see Kibana
- *       {@code kbn-streams-schema/src/helpers/esql_helpers.ts}).</li>
+ *   <li>a <b>document read</b> — {@code FROM <target> METADATA _id, _source | SORT ... | KEEP ... | LIMIT N},
+ *       whose caller reads back the {@code _id} and {@code _source} columns to hydrate whole documents;</li>
+ *   <li>a <b>conditional-count histogram</b> — {@code FROM <target> | STATS errors = COUNT(*) WHERE <pred>,
+ *       total = COUNT(*) BY bucket = BUCKET(@timestamp, 5 minutes)}, the count-over-time / error-rate shape.</li>
  * </ul>
+ * Both combine features that are individually covered elsewhere (per-aggregate filters, computed groupings,
+ * metadata projection, SAMPLE); this suite asserts they compose into exactly the expected remote query, so a
+ * change to one rendering rule cannot silently break the composite shape.
  *
- * <p>These tests assert what the connector renders/decodes <em>today</em> so the supported subset is pinned and
- * the current gaps for the KI/SigEvents use case are documented as executable specs. When a connector closes one
- * of these gaps, the corresponding assertion below should be updated (it will fail, pointing the implementer at
- * the spec to revisit). The companion {@code ElasticsearchExternalSourceLiveIT} covers end-to-end behaviour
- * against a real remote; this suite is deterministic and runs in CI.
+ * <p>{@code ElasticsearchExternalSourceLiveIT} covers the same shapes end-to-end against a real remote cluster;
+ * this suite is deterministic and always runs in CI.
  */
-public class KiSigEventsRenderingTests extends ESTestCase {
+public class ConnectorQueryRenderingTests extends ESTestCase {
 
     private static final String TARGET = "logs";
 
@@ -98,11 +92,11 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // SUPPORTED today: the COUNT-based STATS shapes the SigEvents histogram is built from, plus a projected read.
+    // STATS shapes the conditional-count histogram is built from, plus the projected read.
     // ---------------------------------------------------------------------------------------------------------
 
     public void testUngroupedCountStatsRenders() {
-        // FROM logs | STATS total = COUNT(*) — the simplest SigEvents/KI count, computed remotely.
+        // FROM logs | STATS total = COUNT(*) — the simplest count, computed remotely.
         String query = ElasticsearchConnector.buildRemoteQuery(
             request(List.of(), -1, List.of(), List.of(RemoteAggregate.of("total", "COUNT", null)), List.of())
         );
@@ -124,7 +118,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     public void testGroupedCountByTimeBucketRenders() {
-        // FROM logs | STATS c = COUNT(*) BY bucket = BUCKET(@timestamp, 5 minutes) — the SigEvents histogram core.
+        // FROM logs | STATS c = COUNT(*) BY bucket = BUCKET(@timestamp, 5 minutes) — the histogram core.
         // The grouping is a computed RemoteGrouping carrying the already-rendered BUCKET expression and an alias.
         String query = ElasticsearchConnector.buildRemoteQuery(
             request(
@@ -140,7 +134,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
 
     public void testFilteredCountStatsRenders() {
         // FROM logs | STATS errors = COUNT(*) WHERE log.level == "error" — a per-aggregate filter is rendered as a
-        // WHERE clause attached to the aggregate. This is the SigEvents conditional-count shape (e.g. error rate).
+        // WHERE clause attached to the aggregate. This is the conditional-count shape (e.g. error rate).
         String query = ElasticsearchConnector.buildRemoteQuery(
             request(
                 List.of(),
@@ -154,7 +148,7 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     public void testMultipleFilteredAndPlainAggregatesRender() {
-        // A mix of a filtered count and a plain count in the same STATS, as SigEvents uses for ratios.
+        // A mix of a filtered count and a plain count in the same STATS, the shape a ratio is computed from.
         String query = ElasticsearchConnector.buildRemoteQuery(
             request(
                 List.of(),
@@ -202,9 +196,8 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     public void testMatchStyleProjectedReadRenders() {
-        // The non-aggregated leg of a match-style read: project a couple of fields with a SORT + LIMIT. Note this
-        // is only what the connector CAN render; the KI match shape additionally needs METADATA _id, _source and
-        // a readable _source value, both of which are gaps documented below.
+        // The non-aggregated leg of a document read: project a couple of fields with a SORT + LIMIT. The
+        // METADATA _id, _source half of that shape is asserted separately below.
         String query = ElasticsearchConnector.buildRemoteQuery(
             request(List.of("@timestamp", "message"), 1000, List.of(new RemoteSort("@timestamp", false, false)), List.of(), List.of())
         );
@@ -212,9 +205,9 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // F5 (was GAP 1): METADATA _id, _source IS now rendered. The KI `match` rule path reads back _id and _source,
-    // so when those columns are projected the connector emits the FROM ... METADATA option, then projects them
-    // with KEEP. Without the option the remote response would carry neither column.
+    // METADATA rendering. A caller that hydrates whole documents reads back _id and _source, so when those columns
+    // are projected the connector emits the FROM ... METADATA option and then projects them with KEEP. Without the
+    // option the remote response would carry neither column.
     // ---------------------------------------------------------------------------------------------------------
 
     public void testConnectorRendersMetadataIdAndSource() {
@@ -239,8 +232,8 @@ public class KiSigEventsRenderingTests extends ESTestCase {
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // F6 (was GAP 2): _source / object columns now decode into a BytesRef block holding the captured JSON text,
-    // mirroring how local ES|QL carries a _source value as bytes. This makes the KI `match` read of _source work.
+    // _source / object columns decode into a BytesRef block holding the captured JSON text, mirroring how local
+    // ES|QL carries a _source value as bytes, so a caller can read the whole document back out.
     // ---------------------------------------------------------------------------------------------------------
 
     public void testSourceTypeResolvesToSourceDataType() {
@@ -268,8 +261,8 @@ public class KiSigEventsRenderingTests extends ESTestCase {
 
     // ---------------------------------------------------------------------------------------------------------
     // SAMPLE pushdown: a pushed SAMPLE renders as a remote ` | SAMPLE <p>` so the remote draws the random sample
-    // over the full dataset. SAMPLE sits after WHERE and before SORT/KEEP/LIMIT. KI document sampling depends on
-    // this drawing from the whole corpus rather than a locally-fetched page.
+    // over the full dataset. SAMPLE sits after WHERE and before SORT/KEEP/LIMIT. Document sampling depends on this
+    // drawing from the whole corpus rather than from a locally-fetched page.
     // ---------------------------------------------------------------------------------------------------------
 
     public void testSampleProbabilityRenders() {

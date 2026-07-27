@@ -95,22 +95,15 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
     }
 
     private static Optional<String> render(Expression expr) {
-        if (expr instanceof And and) {
-            return renderBinaryLogical(and.left(), and.right(), "AND");
-        }
-        if (expr instanceof Or or) {
-            return renderBinaryLogical(or.left(), or.right(), "OR");
-        }
-        if (expr instanceof Not not) {
-            return render(not.field()).map(inner -> "NOT (" + inner + ")");
-        }
-        if (expr instanceof EsqlBinaryComparison cmp) {
-            return renderComparison(cmp);
-        }
-        if (expr instanceof In in) {
-            return renderIn(in);
-        }
-        return Optional.empty();
+        return switch (expr) {
+            case And and -> renderBinaryLogical(and.left(), and.right(), "AND");
+            case Or or -> renderBinaryLogical(or.left(), or.right(), "OR");
+            case Not not -> render(not.field()).map(inner -> "NOT (" + inner + ")");
+            case EsqlBinaryComparison cmp -> renderComparison(cmp);
+            case In in -> renderIn(in);
+            // Everything else is left unpushed (and therefore applied by the local FilterExec).
+            default -> Optional.empty();
+        };
     }
 
     /**
@@ -176,25 +169,16 @@ final class EsqlFilterTranslator implements FilterPushdownSupport {
     }
 
     private static String comparisonSymbol(EsqlBinaryComparison cmp) {
-        if (cmp instanceof Equals) {
-            return "==";
-        }
-        if (cmp instanceof NotEquals) {
-            return "!=";
-        }
-        if (cmp instanceof GreaterThan) {
-            return ">";
-        }
-        if (cmp instanceof GreaterThanOrEqual) {
-            return ">=";
-        }
-        if (cmp instanceof LessThan) {
-            return "<";
-        }
-        if (cmp instanceof LessThanOrEqual) {
-            return "<=";
-        }
-        return null;
+        return switch (cmp) {
+            case Equals ignored -> "==";
+            case NotEquals ignored -> "!=";
+            case GreaterThan ignored -> ">";
+            case GreaterThanOrEqual ignored -> ">=";
+            case LessThan ignored -> "<";
+            case LessThanOrEqual ignored -> "<=";
+            // A comparison this connector does not render (e.g. Insensitive*); the caller declines to push it.
+            default -> null;
+        };
     }
 
     /** Mirror a comparison operator so {@code literal < field} becomes {@code field > literal}. */

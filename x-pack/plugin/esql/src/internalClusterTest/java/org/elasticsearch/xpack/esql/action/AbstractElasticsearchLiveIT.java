@@ -7,6 +7,7 @@
 
 package org.elasticsearch.xpack.esql.action;
 
+import org.apache.http.Header;
 import org.apache.http.HttpHost;
 import org.apache.http.message.BasicHeader;
 import org.elasticsearch.client.Request;
@@ -14,6 +15,7 @@ import org.elasticsearch.client.Response;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -61,12 +63,12 @@ abstract class AbstractElasticsearchLiveIT extends AbstractEsqlIntegTestCase {
     protected List<List<Object>> directValues(String esql) throws IOException {
         var builder = RestClient.builder(HttpHost.create(URL));
         if (API_KEY != null) {
-            builder.setDefaultHeaders(new org.apache.http.Header[] { new BasicHeader("Authorization", "ApiKey " + API_KEY) });
+            builder.setDefaultHeaders(new Header[] { new BasicHeader("Authorization", "ApiKey " + API_KEY) });
         }
         try (RestClient client = builder.build()) {
             Request request = new Request("POST", "/_query");
             request.addParameter("format", "json");
-            request.setJsonEntity(Strings.format("{\"query\":%s}", quote(esql)));
+            request.setJsonEntity(queryBody(esql));
             Response response = client.performRequest(request);
             try (
                 InputStream content = response.getEntity().getContent();
@@ -93,8 +95,10 @@ abstract class AbstractElasticsearchLiveIT extends AbstractEsqlIntegTestCase {
         return rows;
     }
 
-    /** JSON-escapes and double-quotes a string so it can be embedded in a JSON body. */
-    protected static String quote(String s) {
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    /** Builds the {@code _query} request body, letting XContent handle escaping rather than hand-rolling it. */
+    private static String queryBody(String esql) throws IOException {
+        try (XContentBuilder builder = JsonXContent.contentBuilder()) {
+            return Strings.toString(builder.startObject().field("query", esql).endObject());
+        }
     }
 }

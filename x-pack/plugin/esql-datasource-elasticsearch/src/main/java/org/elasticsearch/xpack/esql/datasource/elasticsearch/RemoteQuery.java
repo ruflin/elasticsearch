@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.elasticsearch.client.Request;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.json.JsonXContent;
 
@@ -36,7 +37,7 @@ final class RemoteQuery {
     static String body(String esqlQuery) {
         try (XContentBuilder builder = JsonXContent.contentBuilder()) {
             builder.startObject().field("query", esqlQuery).field("columnar", true).endObject();
-            return org.elasticsearch.common.Strings.toString(builder);
+            return Strings.toString(builder);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to build remote ES|QL request body", e);
         }
