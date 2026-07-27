@@ -13,26 +13,19 @@ import org.elasticsearch.xpack.esql.datasources.spi.ExternalServerException;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.not;
 
 public class ElasticsearchConnectorTests extends ESTestCase {
 
     public void testRemoteClientErrorMapsToClientException() {
         // A remote 4xx (e.g. the remote rejected a pushed STATS ... BY a, b) must surface as a client (400) error.
         String body = "{\"error\":{\"type\":\"verification_exception\",\"reason\":\"Unknown column [field2]\"},\"status\":400}";
-        RuntimeException e = ElasticsearchConnector.remoteError(
-            400,
-            "HTTP/1.1 400 Bad Request",
-            body,
-            "FROM logs | STATS c = COUNT(*) BY a, b",
-            null
-        );
+        RuntimeException e = ElasticsearchConnector.remoteError(400, "HTTP/1.1 400 Bad Request", body, null);
 
         assertThat(e, instanceOf(ExternalClientException.class));
         assertThat(e.getMessage(), containsString("400 Bad Request"));
         // The remote's actual reason is preserved so the failure is debuggable, not an opaque "failed to run".
         assertThat(e.getMessage(), containsString("Unknown column [field2]"));
-        // The rendered ES|QL that was rejected is included.
-        assertThat(e.getMessage(), containsString("FROM logs | STATS c = COUNT(*) BY a, b"));
     }
 
     public void testRemoteServerErrorMapsToServerException() {
@@ -41,12 +34,20 @@ public class ElasticsearchConnectorTests extends ESTestCase {
             503,
             "HTTP/1.1 503 Service Unavailable",
             "{\"error\":\"unavailable\"}",
-            "FROM logs | STATS c = COUNT(*)",
             null
         );
 
         assertThat(e, instanceOf(ExternalServerException.class));
         assertThat(e.getMessage(), containsString("503 Service Unavailable"));
+    }
+
+    public void testRemoteErrorDoesNotLeakTheRenderedQuery() {
+        // The message travels back to the caller and into logs, so it must not carry the rendered remote ES|QL:
+        // that string holds the resolved target and every pushed filter literal. The query goes to DEBUG instead.
+        RuntimeException e = ElasticsearchConnector.remoteError(400, "HTTP/1.1 400 Bad Request", "{\"error\":\"bad request\"}", null);
+
+        assertThat(e.getMessage(), not(containsString("FROM")));
+        assertThat(e.getMessage(), not(containsString("WHERE")));
     }
 
     public void testTruncateErrorBodyCollapsesWhitespace() {
