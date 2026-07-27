@@ -209,6 +209,29 @@ public class DatasetRewriterTests extends ESTestCase {
         assertThat("dataset name threaded", out.datasetName(), equalTo("logs"));
     }
 
+    public void testIdAndSourceMetadataForwardedOnElasticsearchDataset() {
+        // The elasticsearch connector forwards _id / _source onto the remote FROM ... METADATA, so the rewriter
+        // passes those metadata fields through to the UnresolvedExternalRelation instead of rejecting them.
+        DataSource parent = elasticsearchDataSource("es_parent");
+        Dataset dataset = new Dataset("remote_logs", new DataSourceReference("es_parent"), "es://host:9200/logs", null, Map.of());
+        ProjectMetadata project = projectWith(Map.of("es_parent", parent), Map.of("remote_logs", dataset));
+
+        UnresolvedRelation relation = new UnresolvedRelation(
+            Source.EMPTY,
+            new IndexPattern(Source.EMPTY, "remote_logs"),
+            false,
+            List.of(MetadataAttribute.create(Source.EMPTY, "_id"), MetadataAttribute.create(Source.EMPTY, "_source")),
+            IndexMode.STANDARD,
+            null
+        );
+        LogicalPlan rewritten = rewrite(relation, project);
+        assertThat(rewritten, instanceOf(UnresolvedExternalRelation.class));
+        UnresolvedExternalRelation out = (UnresolvedExternalRelation) rewritten;
+        assertThat(out.metadataFields(), hasSize(2));
+        assertThat(out.metadataFields().get(0).name(), equalTo("_id"));
+        assertThat(out.metadataFields().get(1).name(), equalTo("_source"));
+    }
+
     public void testDatasetReferencingUnknownDataSourceFailsWithExplicitMessage() {
         // Production scenario: a broken cluster-state restore leaves a Dataset whose parent
         // DataSource is no longer registered. DataSourceService.deleteDataSources rejects (409)
@@ -892,6 +915,11 @@ public class DatasetRewriterTests extends ESTestCase {
 
     private static DataSource dataSource(String name, Map<String, DataSourceSetting> settings) {
         return new DataSource(name, "test", null, settings);
+    }
+
+    /** Data source of the {@code elasticsearch} connector type, which forwards _id / _source metadata to the remote. */
+    private static DataSource elasticsearchDataSource(String name) {
+        return new DataSource(name, "elasticsearch", null, Map.of());
     }
 
     private static ProjectMetadata projectWith(Map<String, DataSource> dataSources, Map<String, Dataset> datasets) {

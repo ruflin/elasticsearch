@@ -22,6 +22,7 @@ import org.elasticsearch.xpack.esql.datasources.FilterEvaluationOrderEstimator;
 import org.elasticsearch.xpack.esql.datasources.FormatNameResolver;
 import org.elasticsearch.xpack.esql.datasources.FormatReaderRegistry;
 import org.elasticsearch.xpack.esql.datasources.PhysicalNames;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.expression.predicate.Predicates;
@@ -251,7 +252,7 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         }
 
         String formatName = resolveFormatName(externalExec.config(), externalExec.sourcePath());
-        FilterPushdownSupport pushdownSupport = resolveFilterPushdownSupport(formatName, ctx);
+        FilterPushdownSupport pushdownSupport = resolveFilterPushdownSupport(formatName, externalExec.sourceType(), ctx);
         if (pushdownSupport == null) {
             return filterExec;
         }
@@ -338,15 +339,38 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
     }
 
     /**
-     * Resolves filter pushdown support for the given format via {@link FormatReader#filterPushdownSupport()}.
+     * Resolves filter pushdown support for the source.
+     * <p>
+     * Connector-based sources (e.g. the elasticsearch connector) expose pushdown through their
+     * {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type. File-based
+     * sources have no connector factory and instead expose it through their
+     * {@link FormatReader#filterPushdownSupport()}, looked up by format name.
+     * <p>
+     * The connector factory is consulted first: a connector's remote resource can look like a file
+     * path (e.g. {@code es://host:9200/logs.parquet}), and the format-reader lookup keys off that
+     * suffix, so checking the connector by source type first prevents misclassifying a connector
+     * source as a Parquet/CSV/etc. file.
      */
-    private static FilterPushdownSupport resolveFilterPushdownSupport(String formatName, LocalPhysicalOptimizerContext ctx) {
-        FormatReaderRegistry formatReaderRegistry = ctx.external() == null ? null : ctx.external().formatReaderRegistry();
-        if (formatReaderRegistry == null) {
+    private static FilterPushdownSupport resolveFilterPushdownSupport(
+        String formatName,
+        String sourceType,
+        LocalPhysicalOptimizerContext ctx
+    ) {
+        if (ctx.external() == null) {
             return null;
         }
-        FormatReader formatReader = formatReaderRegistry.findByName(formatName);
-        return formatReader != null ? formatReader.filterPushdownSupport() : null;
+        ExternalSourceFactory factory = sourceType == null ? null : ctx.external().sourceFactories().get(sourceType);
+        if (factory != null && factory.filterPushdownSupport() != null) {
+            return factory.filterPushdownSupport();
+        }
+        FormatReaderRegistry formatReaderRegistry = ctx.external().formatReaderRegistry();
+        if (formatReaderRegistry != null) {
+            FormatReader formatReader = formatReaderRegistry.findByName(formatName);
+            if (formatReader != null && formatReader.filterPushdownSupport() != null) {
+                return formatReader.filterPushdownSupport();
+            }
+        }
+        return null;
     }
 
     private static PhysicalPlan planFilterExec(FilterExec filterExec, ParameterizedQueryExec pqExec, LocalPhysicalOptimizerContext ctx) {
