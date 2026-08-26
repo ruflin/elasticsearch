@@ -9,9 +9,15 @@
 
 package org.elasticsearch.cluster.metadata;
 
+import org.elasticsearch.core.Tuple;
+
 import java.util.Locale;
+import java.util.Map;
 
 import static org.elasticsearch.test.ESTestCase.randomAlphaOfLength;
+import static org.elasticsearch.test.ESTestCase.randomAlphaOfLengthBetween;
+import static org.elasticsearch.test.ESTestCase.randomBoolean;
+import static org.elasticsearch.test.ESTestCase.randomMap;
 
 public class ViewTestsUtils {
     public static String randomName() {
@@ -20,6 +26,11 @@ public class ViewTestsUtils {
 
     public static View randomView(String name) {
         String query = "FROM " + randomAlphaOfLength(10);
-        return new View(name, query);
+        String description = randomBoolean() ? randomAlphaOfLengthBetween(1, 40) : null;
+        boolean managed = randomBoolean();
+        Map<String, Object> metadata = randomBoolean()
+            ? randomMap(1, 3, () -> Tuple.tuple(randomAlphaOfLength(5), randomAlphaOfLength(8)))
+            : null;
+        return new View(name, query, description, managed, metadata);
     }
 }

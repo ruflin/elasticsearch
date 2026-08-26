@@ -26,6 +26,8 @@ import static org.elasticsearch.rest.RestRequest.Method.GET;
 
 @ServerlessScope(Scope.PUBLIC)
 public class RestGetViewAction extends BaseRestHandler {
+    public static final String VIEW_MANAGED_AND_META = "view_managed_and_meta";
+
     @Override
     public List<Route> routes() {
         return List.of(new Route(GET, "/_query/view/{name}"), new Route(GET, "/_query/view"));
@@ -38,7 +40,10 @@ public class RestGetViewAction extends BaseRestHandler {
 
     @Override
     protected RestChannelConsumer prepareRequest(final RestRequest request, final NodeClient client) throws IOException {
-        GetViewAction.Request req = new GetViewAction.Request(RestUtils.getMasterNodeTimeout(request));
+        GetViewAction.Request req = new GetViewAction.Request(
+            RestUtils.getMasterNodeTimeout(request),
+            request.paramAsBoolean("include_managed", false)
+        );
         var requestedViews = Strings.splitStringByCommaToArray(request.param("name"));
         req.indices(isGetAllViews(requestedViews) ? new String[] { "*" } : requestedViews);
 
@@ -55,6 +60,6 @@ public class RestGetViewAction extends BaseRestHandler {
 
     @Override
     public Set<String> supportedCapabilities() {
-        return Set.of("view_index_abstraction");
+        return Set.of("view_index_abstraction", VIEW_MANAGED_AND_META);
     }
 }

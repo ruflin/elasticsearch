@@ -42,6 +42,10 @@ public class GetViewAction extends ActionType<GetViewAction.Response> {
         .concreteTargetOptions(ERROR_WHEN_UNAVAILABLE_TARGETS)
         .build();
 
+    private static final IndicesOptions VIEW_INDICES_OPTIONS_INCLUDE_MANAGED = IndicesOptions.builder(VIEW_INDICES_OPTIONS)
+        .wildcardOptions(IndicesOptions.WildcardOptions.builder().includeHidden(true))
+        .build();
+
     private GetViewAction() {
         super(NAME);
     }
@@ -49,9 +53,15 @@ public class GetViewAction extends ActionType<GetViewAction.Response> {
     public static class Request extends LocalClusterStateRequest implements IndicesRequest.Replaceable {
         private String[] indices;
         private ResolvedIndexExpressions resolvedIndexExpressions;
+        private final boolean includeManaged;
 
         public Request(TimeValue masterNodeTimeout) {
+            this(masterNodeTimeout, false);
+        }
+
+        public Request(TimeValue masterNodeTimeout, boolean includeManaged) {
             super(masterNodeTimeout);
+            this.includeManaged = includeManaged;
         }
 
         @Override
@@ -66,7 +76,11 @@ public class GetViewAction extends ActionType<GetViewAction.Response> {
 
         @Override
         public IndicesOptions indicesOptions() {
-            return VIEW_INDICES_OPTIONS;
+            return includeManaged ? VIEW_INDICES_OPTIONS_INCLUDE_MANAGED : VIEW_INDICES_OPTIONS;
+        }
+
+        public boolean includeManaged() {
+            return includeManaged;
         }
 
         @Override
@@ -80,12 +94,12 @@ public class GetViewAction extends ActionType<GetViewAction.Response> {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             Request request = (Request) o;
-            return Arrays.equals(this.indices, request.indices);
+            return includeManaged == request.includeManaged && Arrays.equals(this.indices, request.indices);
         }
 
         @Override
         public int hashCode() {
-            return Arrays.hashCode(indices);
+            return Objects.hash(includeManaged, Arrays.hashCode(indices));
         }
 
         @Override

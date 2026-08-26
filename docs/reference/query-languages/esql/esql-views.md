@@ -25,6 +25,29 @@ Views are a good fit when you want to:
 * **Combine pre-processed data sources.** Define one view per source, each with its own filters or aggregations, and query them together in a single `FROM` clause.
 * **Simplify queries for downstream tools.** Dashboards, alerts, or ad-hoc analysts can query `FROM my_view` without needing to know the indices or processing commands behind it.
 
+## Metadata and managed views
+
+In addition to a name and definition, a view may include:
+
+* **Description**: optional human-readable text (up to 1,000 characters).
+* **Managed**: when `true`, the view is owned by Elastic or a plugin. Managed views are hidden from `GET /_query/view` and from `FROM *` wildcards, the same way hidden indices are. They remain queryable and writable by concrete name. Pass `include_managed=true` on GET to list them. Users *can* still `PUT` or `DELETE` a managed view; product features that created it typically overwrite it on restart.
+* **`_meta`**: optional free-form object for owner-specific fields such as `managed_by`, `version`, or `tags` (up to 4 KiB). Elasticsearch does not interpret these keys.
+
+```console
+PUT /_query/view/$.alert-episodes
+{
+    "query": "FROM .rule-events | WHERE type == \"alert\"",
+    "description": "Latest alert per episode.",
+    "managed": true,
+    "_meta": {
+        "managed_by": "alerting_v2",
+        "version": 1
+    }
+}
+```
+
+The `$.` prefix is only a naming convention so a view does not collide with a data stream of the same name. It does **not** mark a view as managed or hidden; set `managed: true` for that.
+
 ## Defining views
 
 Define a view using the REST API:

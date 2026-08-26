@@ -31,7 +31,7 @@
       ]
     },
     "body": {
-      "description": "Use the `query` element to define the ES|QL query to use as a non-materialized VIEW.",
+      "description": "Use `query` for the ES|QL definition. Optional `description`, `managed`, and `_meta` document the view. Managed views are hidden from default listing and `FROM *` but remain writable.",
       "required": true
     }
   }

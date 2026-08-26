@@ -12,6 +12,7 @@ import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.admin.indices.template.put.TransportPutComposableIndexTemplateAction;
 import org.elasticsearch.action.datastreams.CreateDataStreamAction;
 import org.elasticsearch.cluster.metadata.ComposableIndexTemplate;
+import org.elasticsearch.cluster.metadata.View;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.datastreams.DataStreamsPlugin;
 import org.elasticsearch.index.IndexNotFoundException;
@@ -21,9 +22,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.not;
 
@@ -96,5 +102,57 @@ public class ViewRestTests extends AbstractViewTestCase {
         assertThat(error.getMessage(), containsString("view [" + missing + "] not found"));
         // IndexNotFoundException is itself a ResourceNotFoundException subtype, so guard against the raw leak.
         assertThat("GET must not leak the raw index resolution error", error, not(instanceOf(IndexNotFoundException.class)));
+    }
+
+    public void testGetViewHidesManagedUnlessRequested() {
+        assertAcked(
+            client().execute(
+                PutViewAction.INSTANCE,
+                new PutViewAction.Request(
+                    TEST_REQUEST_TIMEOUT,
+                    TEST_REQUEST_TIMEOUT,
+                    new View("user-view", "FROM logs", "user", false, null)
+                )
+            )
+        );
+        assertAcked(
+            client().execute(
+                PutViewAction.INSTANCE,
+                new PutViewAction.Request(
+                    TEST_REQUEST_TIMEOUT,
+                    TEST_REQUEST_TIMEOUT,
+                    new View("sys-view", "FROM logs", "system", true, Map.of("managed_by", "test"))
+                )
+            )
+        );
+
+        GetViewAction.Request list = new GetViewAction.Request(TimeValue.timeValueMinutes(1));
+        list.indices("*");
+        TestResponseCapture<GetViewAction.Response> capture = new TestResponseCapture<>();
+        client().admin().cluster().execute(GetViewAction.INSTANCE, list, capture);
+        assertNull(capture.error.get());
+        assertThat(viewNames(capture.response), containsInAnyOrder("user-view"));
+
+        GetViewAction.Request byName = new GetViewAction.Request(TimeValue.timeValueMinutes(1));
+        byName.indices("sys-view");
+        capture = new TestResponseCapture<>();
+        client().admin().cluster().execute(GetViewAction.INSTANCE, byName, capture);
+        assertNull(capture.error.get());
+        assertThat(viewNames(capture.response), containsInAnyOrder("sys-view"));
+        View managed = capture.response.getViews().iterator().next();
+        assertTrue(managed.managed());
+        assertTrue(managed.isHidden());
+        assertThat(managed.metadata(), equalTo(Map.of("managed_by", "test")));
+
+        GetViewAction.Request includeManaged = new GetViewAction.Request(TimeValue.timeValueMinutes(1), true);
+        includeManaged.indices("*");
+        capture = new TestResponseCapture<>();
+        client().admin().cluster().execute(GetViewAction.INSTANCE, includeManaged, capture);
+        assertNull(capture.error.get());
+        assertThat(viewNames(capture.response), containsInAnyOrder("user-view", "sys-view"));
+    }
+
+    private static Set<String> viewNames(GetViewAction.Response response) {
+        return response.getViews().stream().map(View::name).collect(Collectors.toSet());
     }
 }
