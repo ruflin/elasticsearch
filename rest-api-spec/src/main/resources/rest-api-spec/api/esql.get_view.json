@@ -35,6 +35,13 @@
           ]
         }
       ]
+    },
+    "params": {
+      "include_managed": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, include managed (hidden) views in wildcard and list results. Concrete names always return managed views."
+      }
     }
   }
 }

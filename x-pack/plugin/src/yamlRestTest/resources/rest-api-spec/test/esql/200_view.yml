@@ -648,3 +648,226 @@ setup:
   - match: { values.0: [2, "brown"] }
   - match: { values.1: [4, "brown"] }
   - match: { values.2: [6, "brown"] }
+
+---
+"optional-description-managed-and-meta":
+  - requires:
+      capabilities:
+        - method: PUT
+          path: /_query/view/{name}
+          capabilities: [view_managed_and_meta]
+      test_runner_features: capabilities
+      reason: "View description, managed, and _meta fields introduced"
+
+  - do:
+      esql.put_view:
+        name: meta-dogs
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+          description: "Brown and white dogs"
+          managed: false
+          _meta:
+            managed_by: "user"
+            version: 1
+
+  - do:
+      esql.get_view:
+        name: meta-dogs
+
+  - match: { views.0.name: "meta-dogs" }
+  - match: { views.0.query: 'FROM test | WHERE animal == "dog"' }
+  - match: { views.0.description: "Brown and white dogs" }
+  - is_false: views.0.managed
+  - match: { views.0._meta.managed_by: "user" }
+  - match: { views.0._meta.version: 1 }
+
+  - do:
+      esql.delete_view:
+        name: meta-dogs
+
+---
+"managed-views-hidden-from-default-list":
+  - requires:
+      capabilities:
+        - method: GET
+          path: /_query/view
+          capabilities: [view_managed_and_meta]
+      test_runner_features: capabilities
+      reason: "Managed views are hidden from default listing"
+
+  - do:
+      esql.put_view:
+        name: mh-user
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+
+  - do:
+      esql.put_view:
+        name: mh-sys
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+          description: "System-owned dogs"
+          managed: true
+          _meta:
+            managed_by: "alerting_v2"
+
+  - do:
+      esql.get_view:
+        name: mh-*
+
+  - length: { views: 1 }
+  - match: { views.0.name: "mh-user" }
+
+  - do:
+      esql.get_view:
+        name: mh-sys
+
+  - length: { views: 1 }
+  - match: { views.0.name: "mh-sys" }
+  - is_true: views.0.managed
+  - match: { views.0.description: "System-owned dogs" }
+  - match: { views.0._meta.managed_by: "alerting_v2" }
+
+  - do:
+      esql.get_view:
+        name: mh-*
+        include_managed: true
+
+  - length: { views: 2 }
+
+  - do:
+      esql.delete_view:
+        name: mh-user,mh-sys
+
+---
+"managed-views-hidden-from-wildcard-query":
+  - requires:
+      capabilities:
+        - method: PUT
+          path: /_query/view/{name}
+          capabilities: [view_managed_and_meta]
+      test_runner_features: capabilities
+      reason: "Managed views are hidden from FROM wildcards"
+  - skip:
+      features: warnings
+
+  - do:
+      esql.put_view:
+        name: mw-user
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+
+  - do:
+      esql.put_view:
+        name: mw-sys
+        body:
+          query: 'FROM test | WHERE animal == "cat"'
+          managed: true
+
+  # FROM mw-* should match the unmanaged view only; the managed view stays hidden
+  - do:
+      warnings:
+        - "No limit defined, adding default limit of [1000]"
+      esql.query:
+        body:
+          query: 'FROM mw-* | STATS count = COUNT() BY animal | SORT animal'
+
+  - length: { values: 1 }
+  - match: { values.0: [4, "dog"] }
+
+  # Concrete name still resolves the managed view
+  - do:
+      esql.query:
+        body:
+          query: 'FROM mw-sys | SORT id | KEEP id, animal | LIMIT 10'
+
+  - length: { values: 1 }
+  - match: { values.0: [5, "cat"] }
+
+  - do:
+      esql.delete_view:
+        name: mw-user,mw-sys
+
+---
+"managed-views-remain-writable":
+  - requires:
+      capabilities:
+        - method: PUT
+          path: /_query/view/{name}
+          capabilities: [view_managed_and_meta]
+      test_runner_features: capabilities
+      reason: "Users can still PUT and DELETE managed views"
+
+  - do:
+      esql.put_view:
+        name: mwr-sys
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+          managed: true
+
+  - do:
+      esql.put_view:
+        name: mwr-sys
+        body:
+          query: 'FROM test | WHERE animal == "cat"'
+          managed: true
+
+  - do:
+      esql.get_view:
+        name: mwr-sys
+
+  - match: { views.0.query: 'FROM test | WHERE animal == "cat"' }
+  - is_true: views.0.managed
+
+  - do:
+      esql.delete_view:
+        name: mwr-sys
+
+  - do:
+      catch: /view \[mwr-sys\] not found/
+      esql.get_view:
+        name: mwr-sys
+
+---
+"wildcard-delete-skips-managed-views":
+  - requires:
+      capabilities:
+        - method: PUT
+          path: /_query/view/{name}
+          capabilities: [view_managed_and_meta]
+      test_runner_features: capabilities
+      reason: "Wildcard DELETE skips managed views the same way listing does"
+
+  - do:
+      esql.put_view:
+        name: mdel-user
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+
+  - do:
+      esql.put_view:
+        name: mdel-sys
+        body:
+          query: 'FROM test | WHERE animal == "dog"'
+          managed: true
+
+  - do:
+      esql.delete_view:
+        name: mdel-*
+
+  - do:
+      esql.get_view:
+        name: mdel-*
+
+  - length: { views: 0 }
+
+  - do:
+      esql.get_view:
+        name: mdel-sys
+
+  - match: { views.0.name: "mdel-sys" }
+  - is_true: views.0.managed
+
+  - do:
+      esql.delete_view:
+        name: mdel-sys

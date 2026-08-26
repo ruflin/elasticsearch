@@ -123,6 +123,24 @@ public class InMemoryViewServiceTests extends AbstractStatementParserTests {
         assertThat(viewService.get(projectId, "view3").query(), equalTo("FROM view2"));
     }
 
+    public void testPutManagedViewStoresMetadata() {
+        View view = new View("sys", "FROM emp", "owned", true, Map.of("managed_by", "test", "version", 1));
+        addView(view);
+        View stored = viewService.get(projectId, "sys");
+        assertThat(stored, equalTo(view));
+        assertTrue(stored.managed());
+        assertTrue(stored.isHidden());
+        assertThat(stored.description(), equalTo("owned"));
+        assertThat(stored.metadata(), equalTo(Map.of("managed_by", "test", "version", 1)));
+    }
+
+    public void testManagedViewHiddenFromWildcardFrom() {
+        addView("view-user", "FROM emp1");
+        addView(new View("view-sys", "FROM emp2", null, true, null));
+        assertThat(replaceViews(query("FROM view-*")), matchesPlan(query("FROM emp1")));
+        assertThat(replaceViews(query("FROM view-sys")), matchesPlan(query("FROM emp2")));
+    }
+
     public void testReplaceView() {
         addView("view1", "FROM emp");
         addView("view2", "FROM view1");
@@ -2755,8 +2773,16 @@ public class InMemoryViewServiceTests extends AbstractStatementParserTests {
         addView(name, query, viewService);
     }
 
+    private void addView(View view) {
+        addView(view, viewService);
+    }
+
     private void addView(String name, String query, ViewService viewService) {
-        PutViewAction.Request request = new PutViewAction.Request(TimeValue.ONE_MINUTE, TimeValue.ONE_MINUTE, new View(name, query));
+        addView(new View(name, query), viewService);
+    }
+
+    private void addView(View view, ViewService viewService) {
+        PutViewAction.Request request = new PutViewAction.Request(TimeValue.ONE_MINUTE, TimeValue.ONE_MINUTE, view);
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<Exception> err = new AtomicReference<>(null);
         viewService.putView(projectId, request, ActionListener.wrap(r -> latch.countDown(), e -> {

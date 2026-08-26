@@ -3366,6 +3366,22 @@ public class IndexNameExpressionResolverTests extends ESTestCase {
         // Index name does not appear in views()
         views = indexNameExpressionResolver.views(project, defaultViewOptions, viewRequest(defaultViewOptions, "my-view-index"));
         assertThat(views, empty());
+
+        // Managed views are hidden from wildcards unless includeHidden is set, but concrete names still resolve
+        final String managedName = "sys-view";
+        View managed = new View(managedName, "FROM logs", "system", true, Map.of("managed_by", "test"));
+        ProjectMetadata withManaged = ProjectMetadata.builder(project)
+            .views(Map.of(view1Name, view1, view2Name, view2, managedName, managed))
+            .build();
+        views = indexNameExpressionResolver.views(withManaged, defaultViewOptions, viewRequest(defaultViewOptions, "*"));
+        assertThat(views, containsInAnyOrder(view1Name, view2Name));
+        views = indexNameExpressionResolver.views(withManaged, defaultViewOptions, viewRequest(defaultViewOptions, managedName));
+        assertThat(views, contains(managedName));
+        final IndicesOptions includeHidden = IndicesOptions.builder(defaultViewOptions)
+            .wildcardOptions(IndicesOptions.WildcardOptions.builder().includeHidden(true))
+            .build();
+        views = indexNameExpressionResolver.views(withManaged, includeHidden, viewRequest(includeHidden, "*"));
+        assertThat(views, containsInAnyOrder(view1Name, view2Name, managedName));
     }
 
     private static IndicesRequest viewRequest(IndicesOptions options, String... indices) {

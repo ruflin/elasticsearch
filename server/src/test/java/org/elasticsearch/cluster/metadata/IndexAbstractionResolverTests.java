@@ -26,6 +26,7 @@ import org.junit.Before;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -228,6 +229,77 @@ public class IndexAbstractionResolverTests extends ESTestCase {
                 projectMetadata,
                 indexNameExpressionResolver,
                 false
+            )
+        );
+    }
+
+    public void testManagedViewsHiddenFromWildcards() {
+        View user = new View("user-view", "FROM logs");
+        View managed = new View("sys-view", "FROM logs", "system", true, Map.of("managed_by", "test"));
+        projectMetadata = ProjectMetadata.builder(projectMetadata).views(Map.of(user.name(), user, managed.name(), managed)).build();
+
+        IndicesOptions resolveViews = IndicesOptions.builder()
+            .indexAbstractionOptions(IndicesOptions.IndexAbstractionOptions.builder().resolveViews(true).build())
+            .build();
+        IndicesOptions resolveViewsIncludeHidden = IndicesOptions.builder(resolveViews)
+            .wildcardOptions(IndicesOptions.WildcardOptions.builder().includeHidden(true))
+            .build();
+        IndicesOptions noViews = IndicesOptions.builder()
+            .indexAbstractionOptions(IndicesOptions.IndexAbstractionOptions.builder().resolveViews(false).build())
+            .build();
+
+        assertTrue(
+            IndexAbstractionResolver.isIndexVisibleUnderWildcardAccess(
+                "*",
+                null,
+                "user-view",
+                resolveViews,
+                projectMetadata,
+                indexNameExpressionResolver,
+                true
+            )
+        );
+        assertFalse(
+            IndexAbstractionResolver.isIndexVisibleUnderWildcardAccess(
+                "*",
+                null,
+                "sys-view",
+                resolveViews,
+                projectMetadata,
+                indexNameExpressionResolver,
+                true
+            )
+        );
+        assertTrue(
+            IndexAbstractionResolver.isIndexVisibleUnderWildcardAccess(
+                "*",
+                null,
+                "sys-view",
+                resolveViewsIncludeHidden,
+                projectMetadata,
+                indexNameExpressionResolver,
+                true
+            )
+        );
+        // Concrete names still resolve managed views without includeHidden
+        assertTrue(
+            IndexAbstractionResolver.isIndexVisibleUnderConcreteAccess(
+                "sys-view",
+                null,
+                resolveViews,
+                projectMetadata,
+                indexNameExpressionResolver,
+                true
+            )
+        );
+        assertFalse(
+            IndexAbstractionResolver.isIndexVisibleUnderConcreteAccess(
+                "user-view",
+                null,
+                noViews,
+                projectMetadata,
+                indexNameExpressionResolver,
+                true
             )
         );
     }
