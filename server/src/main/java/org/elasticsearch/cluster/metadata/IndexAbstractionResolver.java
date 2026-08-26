@@ -322,7 +322,15 @@ public class IndexAbstractionResolver {
             throw new IllegalStateException("could not resolve index abstraction [" + index + "]");
         }
         if (indexAbstraction.getType() == IndexAbstraction.Type.VIEW) {
-            return indicesOptions.indexAbstractionOptions().resolveViews();
+            if (indicesOptions.indexAbstractionOptions().resolveViews() == false) {
+                return false;
+            }
+            // Managed views are hidden IndexAbstractions: wildcards skip them unless includeHidden is set,
+            // matching indices. Concrete names still resolve.
+            return isWildcardExpression == false
+                || indexAbstraction.isHidden() == false
+                || indicesOptions.expandWildcardsHidden()
+                || isVisibleDueToImplicitHidden(expression, index);
         }
         if (indexAbstraction.getType() == IndexAbstraction.Type.DATASET) {
             return indicesOptions.indexAbstractionOptions().resolveDatasets();

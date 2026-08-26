@@ -134,6 +134,13 @@ public class InMemoryViewServiceTests extends AbstractStatementParserTests {
         assertThat(stored.metadata(), equalTo(Map.of("managed_by", "test", "version", 1)));
     }
 
+    public void testManagedViewHiddenFromWildcardFrom() {
+        addView("view-user", "FROM emp1");
+        addView(new View("view-sys", "FROM emp2", null, true, null));
+        assertThat(replaceViews(query("FROM view-*")), matchesPlan(query("FROM emp1")));
+        assertThat(replaceViews(query("FROM view-sys")), matchesPlan(query("FROM emp2")));
+    }
+
     public void testReplaceView() {
         addView("view1", "FROM emp");
         addView("view2", "FROM view1");
