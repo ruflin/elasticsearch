@@ -10,6 +10,7 @@ package org.elasticsearch.xpack.esql.action;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.common.network.NetworkModule;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.core.Booleans;
 import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.http.HttpServerTransport;
@@ -20,6 +21,7 @@ import org.elasticsearch.test.NodeConfigurationSource;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.dataset.PutDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.GetDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.PutDataSourceAction;
@@ -29,12 +31,14 @@ import org.junit.Before;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.elasticsearch.xpack.esql.action.EsqlCapabilities.Cap.DATASET_IN_FROM_COMMAND;
@@ -220,6 +224,60 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         assertThat(rows.get(0), equalTo(List.of("bob", 35L)));
     }
 
+    /**
+     * Manual verification hook: start both clusters, load remote data, register a named data source,
+     * prove {@code EXTERNAL} and {@code FROM <dataset>} work, then keep the clusters up.
+     * Skipped unless {@code -Dtests.esql.keep_clusters=true}.
+     */
+    public void testKeepClustersRunningForManualQuery() throws Exception {
+        assumeTrue("opt-in keep-alive for two running clusters", Booleans.parseBoolean(System.getProperty("tests.esql.keep_clusters")));
+        assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
+        assumeTrue("requires dataset-in-from-command capability", DATASET_IN_FROM_COMMAND.isEnabled());
+
+        String remoteIndex = "remote-logs";
+        indexRemoteDocs(remoteIndex);
+
+        String location = "es://" + remoteHttpAddress() + "/" + remoteIndex;
+        List<List<Object>> externalRows = runExternal("EXTERNAL \"" + location + "\" | KEEP name, age | SORT age");
+        assertThat(externalRows.size(), equalTo(3));
+        assertThat(externalRows, hasItem(List.of("alice", 30L)));
+
+        TimeValue timeout = TimeValue.timeValueSeconds(10);
+        String dataSourceName = "remote_prod";
+        String datasetName = "remote_logs";
+        assertTrue(
+            client().execute(
+                PutDataSourceAction.INSTANCE,
+                new PutDataSourceAction.Request(timeout, timeout, dataSourceName, "elasticsearch", null, Map.of())
+            ).actionGet(timeout).isAcknowledged()
+        );
+        assertTrue(
+            client().execute(
+                PutDatasetAction.INSTANCE,
+                new PutDatasetAction.Request(timeout, timeout, datasetName, dataSourceName, location, null, Map.of())
+            ).actionGet(timeout).isAcknowledged()
+        );
+        List<List<Object>> datasetRows = runExternal("FROM " + datasetName + " | KEEP name, age | SORT age");
+        assertThat(datasetRows, equalTo(externalRows));
+
+        Path portsFile = Path.of("/tmp/esql-two-cluster-ports.txt");
+        Files.writeString(
+            portsFile,
+            "local_http="
+                + localHttpAddress()
+                + "\nremote_http="
+                + remoteHttpAddress()
+                + "\nexternal="
+                + location
+                + "\ndataset="
+                + datasetName
+                + "\n"
+        );
+        logger.info("Two clusters are running; details in {}", portsFile);
+        // Keep both clusters up for manual curl / ES|QL verification.
+        Thread.sleep(TimeUnit.HOURS.toMillis(6));
+    }
+
     private List<List<Object>> runExternal(String query) {
         try (var response = run(syncEsqlQueryRequest(query))) {
             List<List<Object>> rows = new ArrayList<>();
@@ -245,7 +303,15 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
     }
 
     private String remoteHttpAddress() {
-        HttpServerTransport http = remoteCluster.getInstance(HttpServerTransport.class);
+        return httpAddress(remoteCluster);
+    }
+
+    private String localHttpAddress() {
+        return httpAddress(internalCluster());
+    }
+
+    private static String httpAddress(InternalTestCluster cluster) {
+        HttpServerTransport http = cluster.getInstance(HttpServerTransport.class);
         InetSocketAddress address = http.boundAddress().publishAddress().address();
         return address.getHostString() + ":" + address.getPort();
     }
