@@ -28,7 +28,10 @@ import org.elasticsearch.xpack.esql.datasources.SplitStats;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
+import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
+import org.elasticsearch.xpack.esql.expression.Order;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
 
 import java.io.IOException;
@@ -74,7 +77,9 @@ import java.util.Set;
  *       {@code unifiedSchema} is the exception: {@code toPhysicalExec()} rebuilds it on every node
  *       from the serialized {@code metadata.schema()}.</li>
  *   <li><b>Local-execution pushdown hints (not serialized):</b> {@code pushedFilter},
- *       {@code pushedExpressions}, {@code pushedLimit}, {@code pushedTopN},
+ *       {@code pushedExpressions}, {@code pushedLimit}, {@code pushedTopN}, {@code pushedSort},
+ *       {@code pushedAggregates}, {@code pushedGroupings}, {@code pushedAggregateIntermediate},
+ *       {@code pushedSample},
  *       {@code deferredExtraction}. These are decisions produced by {@code LocalPhysicalPlanOptimizer}
  *       rules that run <em>after</em> this exec is created, independently on each node. They are
  *       intentionally re-derived per-node and must not be serialized.</li>
@@ -148,6 +153,37 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
      * create a SourceExtractors registry that nothing ever closes).
      */
     private final boolean deferredExtraction;
+    /**
+     * Sort orders the optimizer asked the source to apply remotely, paired with {@link #pushedLimit}.
+     * Only connector sources that natively understand ESQL sorting (e.g. the elasticsearch connector)
+     * consume this; for everyone else it stays empty and the enclosing {@code TopNExec} safety net does
+     * the sorting. NOT serialized — coordinator-only, set by {@code PushSortToExternalSource}.
+     */
+    private final List<Order> pushedSort;
+    /**
+     * Aggregate outputs and group keys the optimizer asked the source to compute remotely. When non-empty the
+     * source's {@link #output()} is the aggregate's output schema (group keys + agg outputs) and the enclosing
+     * {@code AggregateExec} has been removed: the source returns the final grouped rows directly. Only connector
+     * sources that report {@link org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory#aggregatePushdownSupported()}
+     * carry this. NOT serialized — coordinator-only, set by {@code PushConnectorStatsToExternalSource}.
+     */
+    private final List<RemoteAggregate> pushedAggregates;
+    private final List<RemoteGrouping> pushedGroupings;
+    /**
+     * When {@code true}, the pushed aggregate sits in the {@code INITIAL} position of a {@code FINAL(INITIAL(source))}
+     * plan, so the source must emit intermediate aggregator state ({@code [value, seen]} per aggregate) for the
+     * surviving {@code FINAL} aggregate to merge. When {@code false}, the source emits final values (e.g. for a
+     * {@code SINGLE} aggregate, where the rule removed the aggregate entirely). Transient, coordinator-only.
+     */
+    private final boolean pushedAggregateIntermediate;
+    /**
+     * Row-keep probability in {@code (0, 1)} the optimizer asked the source to apply remotely (an ES|QL
+     * {@code SAMPLE}). {@link FormatReader#NO_SAMPLE} ({@code 1.0}) means no sample was pushed. Only connector
+     * sources that report {@link org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory#samplePushdownSupported()}
+     * carry a non-default value; {@code PushSampleToExternalSource} removes the local {@code SampleExec} when it
+     * pushes, so the source is solely responsible for sampling. NOT serialized — coordinator-only.
+     */
+    private final double pushedSample;
 
     /**
      * Public 13-arg ctor used by {@link #info()} (via constructor reference) and by tree tests.
@@ -181,6 +217,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             null,
+            List.of(),
+            List.of(),
+            List.of(),
+            false,
+            FormatReader.NO_SAMPLE,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -226,6 +267,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             null,
+            List.of(),
+            List.of(),
+            List.of(),
+            false,
+            FormatReader.NO_SAMPLE,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -255,6 +301,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         List<Expression> pushedExpressions,
         int pushedLimit,
         @Nullable BlockHash.TopNDef pushedTopN,
+        List<Order> pushedSort,
+        List<RemoteAggregate> pushedAggregates,
+        List<RemoteGrouping> pushedGroupings,
+        boolean pushedAggregateIntermediate,
+        double pushedSample,
         Integer estimatedRowSize,
         FileList fileList,
         Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap,
@@ -272,6 +323,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -294,6 +350,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         List<Expression> pushedExpressions,
         int pushedLimit,
         @Nullable BlockHash.TopNDef pushedTopN,
+        List<Order> pushedSort,
+        List<RemoteAggregate> pushedAggregates,
+        List<RemoteGrouping> pushedGroupings,
+        boolean pushedAggregateIntermediate,
+        double pushedSample,
         Integer estimatedRowSize,
         FileList fileList,
         Map<StoragePath, SchemaReconciliation.FileSchemaInfo> schemaMap,
@@ -322,6 +383,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         this.pushedExpressions = pushedExpressions != null ? List.copyOf(pushedExpressions) : List.of();
         this.pushedLimit = pushedLimit;
         this.pushedTopN = pushedTopN;
+        this.pushedSort = pushedSort != null ? List.copyOf(pushedSort) : List.of();
+        this.pushedAggregates = pushedAggregates != null ? List.copyOf(pushedAggregates) : List.of();
+        this.pushedGroupings = pushedGroupings != null ? List.copyOf(pushedGroupings) : List.of();
+        this.pushedAggregateIntermediate = pushedAggregateIntermediate;
+        this.pushedSample = pushedSample;
         this.estimatedRowSize = estimatedRowSize;
         this.fileList = fileList;
         this.schemaMap = schemaMap != null ? schemaMap : Map.of();
@@ -420,6 +486,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             List.of(),
             FormatReader.NO_LIMIT,
             null,
+            List.of(),
+            List.of(),
+            List.of(),
+            false,
+            FormatReader.NO_SAMPLE,
             estimatedRowSize,
             null,
             Map.of(),
@@ -569,6 +640,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -597,6 +673,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             newFileList,
             schemaMap,
@@ -620,6 +701,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -643,6 +729,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             newPushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -666,6 +757,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             newLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -701,6 +797,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -727,6 +828,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             newPushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -749,6 +855,150 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
     }
 
     /**
+     * Returns a copy of this source carrying the given remote sort orders. See {@link #pushedSort()}.
+     */
+    public ExternalSourceExec withPushedSort(List<Order> newPushedSort) {
+        return new ExternalSourceExec(
+            source(),
+            sourcePath,
+            sourceType,
+            attributes,
+            config,
+            sourceMetadata,
+            pushedFilter,
+            pushedExpressions,
+            pushedLimit,
+            pushedTopN,
+            newPushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
+            estimatedRowSize,
+            fileList,
+            schemaMap,
+            unifiedSchema,
+            splits,
+            datasetName,
+            deferredExtraction,
+            declaredReadSpec
+        );
+    }
+
+    /**
+     * Sort orders set by {@code PushSortToExternalSource} for connector sources that apply the sort remotely
+     * (alongside {@link #pushedLimit()}). Empty when no sort was pushed. Transient local-execution hint; never
+     * serialized and re-derived independently on each node.
+     */
+    public List<Order> pushedSort() {
+        return pushedSort;
+    }
+
+    /**
+     * Returns a copy of this source carrying the given remote aggregate spec and group keys, with its output
+     * rewritten to {@code newOutput}. The caller (the optimizer rule) replaces the enclosing {@code INITIAL}
+     * {@code AggregateExec} with this source. {@code intermediate} selects the output contract: {@code true} for
+     * the {@code FINAL(INITIAL(source))} case where the source must emit intermediate aggregator state for the
+     * surviving {@code FINAL} aggregate (and {@code newOutput} is the {@code INITIAL} intermediate attributes);
+     * {@code false} for a {@code SINGLE} aggregate that the rule removed entirely (and {@code newOutput} is the
+     * final aggregate output). See {@link #pushedAggregates()} and {@link #pushedAggregateIntermediate()}.
+     */
+    public ExternalSourceExec withPushedAggregate(
+        List<RemoteAggregate> newPushedAggregates,
+        List<RemoteGrouping> newPushedGroupings,
+        List<Attribute> newOutput,
+        boolean intermediate
+    ) {
+        return new ExternalSourceExec(
+            source(),
+            sourcePath,
+            sourceType,
+            newOutput,
+            config,
+            sourceMetadata,
+            pushedFilter,
+            pushedExpressions,
+            pushedLimit,
+            pushedTopN,
+            pushedSort,
+            newPushedAggregates,
+            newPushedGroupings,
+            intermediate,
+            pushedSample,
+            estimatedRowSize,
+            fileList,
+            schemaMap,
+            unifiedSchema,
+            splits,
+            datasetName,
+            deferredExtraction,
+            declaredReadSpec
+        );
+    }
+
+    /**
+     * Aggregate outputs set by {@code PushConnectorStatsToExternalSource} for connector sources that compute the
+     * aggregate remotely. Empty when no aggregate was pushed. When non-empty the source's {@link #output()} is the
+     * aggregate output schema. Transient local-execution hint; never serialized.
+     */
+    public List<RemoteAggregate> pushedAggregates() {
+        return pushedAggregates;
+    }
+
+    /** Group keys paired with {@link #pushedAggregates()} ({@code STATS ... BY <these>}). Empty for ungrouped. */
+    public List<RemoteGrouping> pushedGroupings() {
+        return pushedGroupings;
+    }
+
+    /**
+     * Whether the pushed aggregate must emit intermediate aggregator state ({@code [value, seen]} per aggregate)
+     * for a surviving {@code FINAL} aggregate to merge, rather than final values. See {@link #pushedAggregateIntermediate}.
+     */
+    public boolean pushedAggregateIntermediate() {
+        return pushedAggregateIntermediate;
+    }
+
+    /**
+     * Returns a copy of this source carrying the given remote sample probability. See {@link #pushedSample()}.
+     */
+    public ExternalSourceExec withPushedSample(double newPushedSample) {
+        return new ExternalSourceExec(
+            source(),
+            sourcePath,
+            sourceType,
+            attributes,
+            config,
+            sourceMetadata,
+            pushedFilter,
+            pushedExpressions,
+            pushedLimit,
+            pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            newPushedSample,
+            estimatedRowSize,
+            fileList,
+            schemaMap,
+            unifiedSchema,
+            splits,
+            datasetName,
+            deferredExtraction,
+            declaredReadSpec
+        );
+    }
+
+    /**
+     * Row-keep probability set by {@code PushSampleToExternalSource} for connector sources that apply an ES|QL
+     * {@code SAMPLE} remotely. {@link FormatReader#NO_SAMPLE} when no sample was pushed. Transient local-execution
+     * hint; never serialized and re-derived independently on each node.
+     */
+    public double pushedSample() {
+        return pushedSample;
+    }
+
+    /**
      * Returns a copy of this source carrying the given pre-prune Unified schema. See {@link #unifiedSchema()}.
      * Applied by {@link org.elasticsearch.xpack.esql.plan.logical.ExternalRelation#toPhysicalExec()} after
      * construction so the Unified schema does not appear in {@link #info()} (which would let the optimizer's
@@ -766,6 +1016,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -809,6 +1064,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -838,6 +1098,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -874,6 +1139,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -904,6 +1174,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             newEstimatedRowSize,
             fileList,
             schemaMap,
@@ -917,9 +1192,10 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
 
     @Override
     protected NodeInfo<? extends PhysicalPlan> info() {
-        // pushedTopN: excluded — transient local-execution hint; including it would break the
-        // node-reflection invariant in EsqlNodeSubclassTests#testInfoParameters. Preserved via
-        // explicit with* methods; rendered in nodeString() for debuggability.
+        // pushedTopN / pushedSort / pushedAggregates / pushedGroupings: excluded — transient local-execution
+        // hints; including them would break the node-reflection invariant in
+        // EsqlNodeSubclassTests#testInfoParameters. Preserved via explicit with* methods; rendered in
+        // nodeString() for debuggability.
         // unifiedSchema: also excluded — the optimizer's attribute-rewriting rules walk every arg
         // in info() and would prune the Unified schema along with `attributes`, defeating its
         // whole purpose. Preserved through with* methods which carry it explicitly.
@@ -965,6 +1241,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             pushedExpressions,
             pushedLimit,
             pushedTopN,
+            pushedSort,
+            pushedAggregates,
+            pushedGroupings,
+            pushedAggregateIntermediate,
+            pushedSample,
             estimatedRowSize,
             fileList,
             schemaMap,
@@ -996,6 +1277,11 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
             && Objects.equals(pushedExpressions, other.pushedExpressions)
             && pushedLimit == other.pushedLimit
             && Objects.equals(pushedTopN, other.pushedTopN)
+            && Objects.equals(pushedSort, other.pushedSort)
+            && Objects.equals(pushedAggregates, other.pushedAggregates)
+            && Objects.equals(pushedGroupings, other.pushedGroupings)
+            && pushedAggregateIntermediate == other.pushedAggregateIntermediate
+            && Double.compare(pushedSample, other.pushedSample) == 0
             && Objects.equals(estimatedRowSize, other.estimatedRowSize)
             && Objects.equals(fileList, other.fileList)
             && Objects.equals(schemaMap, other.schemaMap)
@@ -1025,8 +1311,21 @@ public class ExternalSourceExec extends LeafExec implements EstimatesRowSize, Da
         if (pushedLimit != FormatReader.NO_LIMIT) {
             sb.append("[limit=").append(pushedLimit).append("]");
         }
+        if (pushedSample != FormatReader.NO_SAMPLE) {
+            sb.append("[sample=").append(pushedSample).append("]");
+        }
         if (pushedTopN != null) {
             sb.append("[topN=keys:").append(pushedTopN.sortKeys().size()).append(",limit:").append(pushedTopN.limit()).append("]");
+        }
+        if (pushedSort.isEmpty() == false) {
+            sb.append("[sort=").append(pushedSort).append("]");
+        }
+        if (pushedAggregates.isEmpty() == false) {
+            sb.append("[stats=").append(pushedAggregates);
+            if (pushedGroupings.isEmpty() == false) {
+                sb.append(" by ").append(pushedGroupings);
+            }
+            sb.append("]");
         }
         if (splits.isEmpty() == false) {
             sb.append("[splits=").append(splits.size()).append("]");

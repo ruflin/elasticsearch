@@ -217,6 +217,86 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         assertFalse("Storage factory should not be called yet", SPY_STORAGE_FACTORY_CALLED.get());
     }
 
+    public void testLazyConnectorFlattensDatasourceConfig() {
+        RecordingConnectorPlugin plugin = new RecordingConnectorPlugin();
+        List<DataSourcePlugin> plugins = List.of(plugin);
+        DataSourceModule module = new DataSourceModule(
+            plugins,
+            DataSourceCapabilities.build(plugins),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+
+        ExternalSourceFactory factory = module.sourceFactories().get("rec");
+        assertTrue("expected a LazyConnectorFactory", factory instanceof DataSourceModule.LazyConnectorFactory);
+        DataSourceModule.LazyConnectorFactory lazy = (DataSourceModule.LazyConnectorFactory) factory;
+
+        // A named-datasource query forwards connection settings under the _datasource sub-map plus the
+        // per-dataset format settings at the top level. The connector must see the connection settings
+        // promoted to the top level (mirroring the storage-provider path).
+        Map<String, Object> config = new java.util.HashMap<>();
+        config.put("format", "json");
+        config.put(ExternalSourceResolver.DATASOURCE_CONFIG_KEY, Map.of("api_key", "secret-key", "endpoint", "https://host:443"));
+
+        lazy.resolveMetadata("rec://host/index", config);
+        assertNotNull("connector should have received a config", RecordingConnector.LAST_RESOLVE_CONFIG.get());
+        assertEquals("secret-key", RecordingConnector.LAST_RESOLVE_CONFIG.get().get("api_key"));
+        assertEquals("https://host:443", RecordingConnector.LAST_RESOLVE_CONFIG.get().get("endpoint"));
+        assertEquals("json", RecordingConnector.LAST_RESOLVE_CONFIG.get().get("format"));
+        assertFalse(
+            "the _datasource carrier should be flattened away",
+            RecordingConnector.LAST_RESOLVE_CONFIG.get().containsKey(ExternalSourceResolver.DATASOURCE_CONFIG_KEY)
+        );
+
+        lazy.open(config);
+        assertEquals("secret-key", RecordingConnector.LAST_OPEN_CONFIG.get().get("api_key"));
+        assertFalse(RecordingConnector.LAST_OPEN_CONFIG.get().containsKey(ExternalSourceResolver.DATASOURCE_CONFIG_KEY));
+    }
+
+    public void testLazyConnectorLoadsFromSourceFactories() {
+        RecordingConnector.LAST_RESOLVE_CONFIG.set(null);
+        DataSourcePlugin plugin = new DataSourcePlugin() {
+            @Override
+            public Set<String> supportedConnectorSchemes() {
+                return Set.of("src");
+            }
+
+            @Override
+            public Map<String, ExternalSourceFactory> sourceFactories(Settings settings) {
+                return Map.of("src", new RecordingConnectorFactory() {
+                    @Override
+                    public String type() {
+                        return "src";
+                    }
+
+                    @Override
+                    public boolean canHandle(String location) {
+                        return location != null && location.startsWith("src://");
+                    }
+                });
+            }
+        };
+
+        List<DataSourcePlugin> plugins = List.of(plugin);
+        DataSourceModule module = new DataSourceModule(
+            plugins,
+            DataSourceCapabilities.build(plugins),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+
+        ExternalSourceFactory factory = module.sourceFactories().get("src");
+        assertTrue(factory instanceof DataSourceModule.LazyConnectorFactory);
+        factory.resolveMetadata("src://host/index", Map.of());
+        assertNotNull(RecordingConnector.LAST_RESOLVE_CONFIG.get());
+    }
+
     public void testConnectorSchemesInCapabilities() {
         DataSourcePlugin connectorPlugin = new DataSourcePlugin() {
             @Override
@@ -383,6 +463,65 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         @Override
         public List<String> fileExtensions() {
             return extensions;
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    // ===== Recording connector used by testLazyConnectorFlattensDatasourceConfig =====
+
+    private static class RecordingConnectorPlugin implements DataSourcePlugin {
+        @Override
+        public Set<String> supportedConnectorSchemes() {
+            return Set.of("rec");
+        }
+
+        @Override
+        public Map<String, ConnectorFactory> connectors(Settings settings) {
+            return Map.of("rec", new RecordingConnectorFactory());
+        }
+    }
+
+    private static class RecordingConnectorFactory implements ConnectorFactory {
+        @Override
+        public String type() {
+            return "rec";
+        }
+
+        @Override
+        public boolean canHandle(String location) {
+            return location != null && location.startsWith("rec://");
+        }
+
+        @Override
+        public void validateConfig(String location, Map<String, Object> config) {}
+
+        @Override
+        public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
+            RecordingConnector.LAST_RESOLVE_CONFIG.set(Map.copyOf(config));
+            return new org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata(List.of(), "rec", location);
+        }
+
+        @Override
+        public org.elasticsearch.xpack.esql.datasources.spi.Connector open(Map<String, Object> config) {
+            RecordingConnector.LAST_OPEN_CONFIG.set(Map.copyOf(config));
+            return new RecordingConnector();
+        }
+    }
+
+    private static class RecordingConnector implements org.elasticsearch.xpack.esql.datasources.spi.Connector {
+        static final java.util.concurrent.atomic.AtomicReference<Map<String, Object>> LAST_RESOLVE_CONFIG =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        static final java.util.concurrent.atomic.AtomicReference<Map<String, Object>> LAST_OPEN_CONFIG =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+        @Override
+        public org.elasticsearch.xpack.esql.datasources.spi.ResultCursor execute(
+            org.elasticsearch.xpack.esql.datasources.spi.QueryRequest request,
+            org.elasticsearch.xpack.esql.datasources.spi.Split split
+        ) {
+            throw new UnsupportedOperationException("not used in this test");
         }
 
         @Override

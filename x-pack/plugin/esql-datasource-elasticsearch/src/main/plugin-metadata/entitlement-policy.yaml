@@ -1,0 +1,4 @@
+# The elasticsearch connector opens an HTTP RestClient to a remote cluster
+# for schema resolution and query execution. That requires outbound sockets.
+ALL-UNNAMED:
+  - outbound_network

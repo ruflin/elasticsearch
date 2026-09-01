@@ -586,6 +586,7 @@ tasks.register("checkBuildLogic").configure {
     ':x-pack:plugin:esql-datasource-bzip2',
     ':x-pack:plugin:esql-datasource-compression-libs',
     ':x-pack:plugin:esql-datasource-csv',
+    ':x-pack:plugin:esql-datasource-elasticsearch',
     ':x-pack:plugin:esql-datasource-gcs',
     ':x-pack:plugin:esql-datasource-grpc',
     ':x-pack:plugin:esql-datasource-gzip',

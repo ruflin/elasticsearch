@@ -37,6 +37,7 @@ import org.elasticsearch.xpack.esql.datasources.cache.SchemaCacheEntry;
 import org.elasticsearch.xpack.esql.datasources.cache.SchemaCacheKey;
 import org.elasticsearch.xpack.esql.datasources.cache.StorageProviderCache;
 import org.elasticsearch.xpack.esql.datasources.glob.GlobExpander;
+import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DeclaredTypeCoercions;
 import org.elasticsearch.xpack.esql.datasources.spi.ErrorPolicy;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalClientException;
@@ -642,7 +643,17 @@ public class ExternalSourceResolver {
         // expansion, cache listing, or any footer read.
         throwIfCancelled();
 
-        if (GlobExpander.isMultiFile(path)) {
+        // API connectors are not byte-addressable: skip storage listing / FileList construction and
+        // resolve metadata through the factory alone. File-based sources keep the listing rails below.
+        ExternalSourceFactory claiming = firstClaimingFactory(path, config);
+        if (claiming instanceof ConnectorFactory) {
+            resolveConnectorSource(path, config, declaredMapping, listener);
+            return;
+        }
+
+        // Connectors that resolve their own patterns (e.g. an Elasticsearch index pattern like logs*)
+        // must not be glob-expanded against the storage provider; pass the pattern through as one source.
+        if (GlobExpander.isMultiFile(path) && (claiming != null && claiming.expandsPatternRemotely()) == false) {
             resolveMultiFileSource(path, config, hints, declaredMapping, requiresStats, listener);
         } else {
             resolveSingleFileSource(path, config, declaredMapping, listener);
@@ -2079,6 +2090,46 @@ public class ExternalSourceResolver {
      */
     private static RuntimeException lastFactoryFailure(String path, Exception lastFailure) {
         return new IllegalArgumentException(ExternalFailures.resolutionFailureMessage(path, lastFailure), lastFailure);
+    }
+
+    /**
+     * First factory whose config-aware {@code canHandle} claims this path, in registry iteration order.
+     * Same first-claim-wins rule as the resolve rails: overlapping claims (an explicit {@code format},
+     * a connector scheme that also looks like a file URI) must pick one factory consistently.
+     */
+    private ExternalSourceFactory firstClaimingFactory(String path, Map<String, Object> config) {
+        for (ExternalSourceFactory factory : dataSourceModule.sourceFactories().values()) {
+            if (factory.canHandle(path, config)) {
+                return factory;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Resolves an API connector without borrowing a {@link StorageProvider} or building a concrete
+     * {@link FileList}. Connectors are not byte-addressable; connector split discovery does not read
+     * the listing, so {@link FileList#UNRESOLVED} is the honest sentinel.
+     */
+    private void resolveConnectorSource(
+        String path,
+        Map<String, Object> config,
+        @Nullable DatasetMapping declaredMapping,
+        ActionListener<ExternalSourceResolution.ResolvedSource> listener
+    ) {
+        try {
+            SourceMetadata metadata = resolveSingleSource(path, config);
+            ExternalSourceMetadata extMetadata = wrapAsExternalSourceMetadata(metadata, config, declaredReadSpecOf(declaredMapping));
+            listener.onResponse(
+                new ExternalSourceResolution.ResolvedSource(
+                    extMetadata,
+                    FileList.UNRESOLVED,
+                    singleEntrySchemaMap(StoragePath.of(path), extMetadata.schema())
+                )
+            );
+        } catch (Exception e) {
+            listener.onFailure(e);
+        }
     }
 
     private SourceMetadata resolveSingleSource(String path, Map<String, Object> config) {
