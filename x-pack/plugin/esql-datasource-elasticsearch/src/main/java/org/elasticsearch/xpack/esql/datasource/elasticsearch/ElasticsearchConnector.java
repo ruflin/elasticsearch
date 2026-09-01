@@ -51,7 +51,7 @@ import java.util.function.BiConsumer;
  * {@code _query} API over HTTP and materializes the columnar response into ES|QL {@link Page}s.
  * <p>
  * v1 executes the whole query in a single round-trip and returns a single-page cursor. Pagination
- * and aggregation pushdown are deferred to later phases.
+ * is deferred; WHERE / SORT / LIMIT / SAMPLE / selected STATS are pushed into the remote query.
  */
 class ElasticsearchConnector implements Connector {
 

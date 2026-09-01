@@ -80,11 +80,15 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
 
     /** True if {@code location} uses one of this connector's URI schemes. Shared with CRUD-time validation. */
     static boolean canHandleLocation(String location) {
-        return location != null
-            && (location.startsWith("es://")
-                || location.startsWith("elasticsearch://")
-                || location.startsWith("es+https://")
-                || location.startsWith("elasticsearch+https://"));
+        if (location == null) {
+            return false;
+        }
+        for (String scheme : ElasticsearchDataSourcePlugin.SCHEMES) {
+            if (location.startsWith(scheme + "://")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

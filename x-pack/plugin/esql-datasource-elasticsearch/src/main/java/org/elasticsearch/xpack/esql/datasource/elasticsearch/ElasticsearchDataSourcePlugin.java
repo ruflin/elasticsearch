@@ -32,6 +32,12 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
     // Plaintext and TLS (+https) variants of both aliases. TLS is opt-in via the scheme suffix.
     static final Set<String> SCHEMES = Set.of("es", "elasticsearch", "es+https", "elasticsearch+https");
 
+    /**
+     * Storage-scheme declaration for the placeholder {@link ElasticsearchStorageProvider}. The
+     * resolver still builds a one-entry {@code FileList} for every source (including connectors),
+     * so this must stay even though reads go through the connector. Same pattern as Flight.
+     * Capability advertising for {@code es://} itself is {@link #supportedConnectorSchemes()}.
+     */
     @Override
     public Set<String> supportedSchemes() {
         return SCHEMES;

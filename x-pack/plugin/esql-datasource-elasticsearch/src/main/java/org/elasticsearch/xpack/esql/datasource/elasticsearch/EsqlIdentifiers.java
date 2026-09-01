@@ -7,6 +7,8 @@
 
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
+import org.elasticsearch.xpack.esql.parser.ParserUtils;
+
 /**
  * Helpers for rendering identifiers (index targets and field names) into the remote ES|QL string
  * that this connector sends to the remote {@code _query} API.
@@ -21,10 +23,12 @@ final class EsqlIdentifiers {
 
     /**
      * Backtick-quotes an identifier so names containing dots, spaces, reserved words, or other
-     * special characters remain a single valid ES|QL identifier. Embedded backticks are doubled.
+     * special characters remain a single valid ES|QL identifier. Delegates to
+     * {@link ParserUtils#quoteIdString(String)} so quoting matches the parser (embedded backticks
+     * are doubled).
      */
     static String quote(String name) {
-        return "`" + name.replace("`", "``") + "`";
+        return ParserUtils.quoteIdString(name);
     }
 
     /**

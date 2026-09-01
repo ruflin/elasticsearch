@@ -44,6 +44,13 @@ import java.util.Optional;
  * boolean / datetime value (either operand order), {@code <field> IN (<foldable values>)}, combined with
  * {@code AND}, {@code OR} and {@code NOT}. The value side may be any foldable expression (a literal or a
  * foldable function such as {@code TO_DATETIME("...")}), not only a {@link Literal}.
+ * <p>
+ * Rendering is from the optimized expression tree, not {@link Expression#sourceText()}. The STATS
+ * pushdown path can forward source text because it also checks the names against the remote schema;
+ * {@code FilterPushdownSupport} does not receive that schema, and after {@code EVAL} rewriting
+ * source text can still name a local alias the remote does not have. Re-rendering the folded tree
+ * (field vs literal) stays correct when the optimizer has already rewritten {@code x} back to
+ * {@code age}.
  */
 final class EsqlFilterTranslator implements FilterPushdownSupport {
 

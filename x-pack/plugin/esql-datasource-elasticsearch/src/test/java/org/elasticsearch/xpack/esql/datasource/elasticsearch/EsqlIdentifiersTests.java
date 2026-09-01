@@ -8,8 +8,16 @@
 package org.elasticsearch.xpack.esql.datasource.elasticsearch;
 
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xpack.esql.parser.ParserUtils;
 
 public class EsqlIdentifiersTests extends ESTestCase {
+
+    public void testQuoteDelegatesToParser() {
+        // Quoting must stay identical to the parser so a pushed KEEP/WHERE identifier is valid remote ES|QL.
+        for (String name : new String[] { "message", "@timestamp", "field.with.dots", "a`b", "" }) {
+            assertEquals(ParserUtils.quoteIdString(name), EsqlIdentifiers.quote(name));
+        }
+    }
 
     public void testQuoteWrapsInBackticks() {
         assertEquals("`message`", EsqlIdentifiers.quote("message"));
