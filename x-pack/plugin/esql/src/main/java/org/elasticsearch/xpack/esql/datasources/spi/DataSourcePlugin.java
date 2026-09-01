@@ -120,7 +120,12 @@ public interface DataSourcePlugin {
         return decompressionCodecs(settings);
     }
 
-    // Complete external source factories
+    /**
+     * Complete external source factories keyed by type (e.g. {@code "clickhouse"}, {@code "flight"}).
+     * Connector plugins should prefer this over {@link #connectors(Settings)}.
+     * {@code DataSourceModule} still lazy-loads via {@link #supportedConnectorSchemes()} and
+     * resolves the factory from here first, falling back to {@link #connectors(Settings)}.
+     */
     default Map<String, ExternalSourceFactory> sourceFactories(Settings settings) {
         return Map.of();
     }
@@ -128,6 +133,7 @@ public interface DataSourcePlugin {
     // FIXME: the methods below are superseded by sourceFactories() and ExternalSourceFactory capabilities.
     // Migrate plugins from connectors()/tableCatalogs() to sourceFactories(),
     // and from operatorFactories() to ExternalSourceFactory methods.
+    // DataSourceModule still accepts connectors() when sourceFactories() is empty.
     default Map<String, TableCatalogFactory> tableCatalogs(Settings settings) {
         return Map.of();
     }

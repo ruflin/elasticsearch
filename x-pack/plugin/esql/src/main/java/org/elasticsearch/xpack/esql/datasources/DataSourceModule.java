@@ -28,6 +28,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.FormatReaderFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatSpec;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceOperatorFactoryProvider;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitProvider;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProvider;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
@@ -379,6 +380,7 @@ public final class DataSourceModule implements Closeable {
         private final ResourceWatcherService resourceWatcherService;
         private volatile Map<String, StorageProviderFactory> storageFactoriesCache;
         private volatile Map<String, FormatReaderFactory> formatFactoriesCache;
+        private volatile Map<String, ExternalSourceFactory> sourceFactoriesCache;
         private volatile Map<String, ConnectorFactory> connectorFactoriesCache;
         private volatile Map<String, TableCatalogFactory> catalogFactoriesCache;
 
@@ -418,6 +420,17 @@ public final class DataSourceModule implements Closeable {
                 }
             }
             return formatFactoriesCache;
+        }
+
+        Map<String, ExternalSourceFactory> sourceFactories() {
+            if (sourceFactoriesCache == null) {
+                synchronized (this) {
+                    if (sourceFactoriesCache == null) {
+                        sourceFactoriesCache = plugin.sourceFactories(settings);
+                    }
+                }
+            }
+            return sourceFactoriesCache;
         }
 
         Map<String, ConnectorFactory> connectorFactories() {
@@ -498,28 +511,72 @@ public final class DataSourceModule implements Closeable {
             return resolveDelegate().operatorFactory();
         }
 
+        @Override
+        public SplitProvider splitProvider() {
+            // Must delegate: the default SplitProvider.SINGLE emits no splits. Connector plugins
+            // (Flight, ClickHouse) supply their own provider so the planner has a unit of work to
+            // schedule — without this, ungrouped aggregates such as STATS COUNT(*) return zero rows.
+            return resolveDelegate().splitProvider();
+        }
+
         private ConnectorFactory resolveDelegate() {
             if (delegate == null) {
                 synchronized (this) {
                     if (delegate == null) {
-                        Map<String, ConnectorFactory> connectors = state.connectorFactories();
-                        if (connectors.isEmpty()) {
-                            throw new IllegalStateException("Plugin " + pluginName + " declared schemes but connectors() returned empty");
+                        delegate = resolveFromSourceFactories();
+                        if (delegate == null) {
+                            delegate = resolveFromConnectors();
                         }
-                        if (connectors.size() > 1) {
-                            throw new IllegalStateException(
-                                "Plugin "
-                                    + pluginName
-                                    + " returned multiple connectors "
-                                    + connectors.keySet()
-                                    + "; lazy mode supports a single connector per plugin"
-                            );
-                        }
-                        delegate = connectors.values().iterator().next();
                     }
                 }
             }
             return delegate;
+        }
+
+        /**
+         * Preferred path: plugins that have migrated off {@code connectors()} register a
+         * {@link ConnectorFactory} through {@link DataSourcePlugin#sourceFactories(Settings)}.
+         */
+        private ConnectorFactory resolveFromSourceFactories() {
+            Map<String, ExternalSourceFactory> factories = state.sourceFactories();
+            if (factories.isEmpty()) {
+                return null;
+            }
+            if (factories.size() > 1) {
+                throw new IllegalStateException(
+                    "Plugin "
+                        + pluginName
+                        + " returned multiple source factories "
+                        + factories.keySet()
+                        + "; lazy mode supports a single connector per plugin"
+                );
+            }
+            ExternalSourceFactory factory = factories.values().iterator().next();
+            if (factory instanceof ConnectorFactory connectorFactory) {
+                return connectorFactory;
+            }
+            throw new IllegalStateException(
+                "Plugin " + pluginName + " sourceFactories() entry [" + factory.type() + "] is not a ConnectorFactory"
+            );
+        }
+
+        private ConnectorFactory resolveFromConnectors() {
+            Map<String, ConnectorFactory> connectors = state.connectorFactories();
+            if (connectors.isEmpty()) {
+                throw new IllegalStateException(
+                    "Plugin " + pluginName + " declared schemes but sourceFactories() and connectors() returned empty"
+                );
+            }
+            if (connectors.size() > 1) {
+                throw new IllegalStateException(
+                    "Plugin "
+                        + pluginName
+                        + " returned multiple connectors "
+                        + connectors.keySet()
+                        + "; lazy mode supports a single connector per plugin"
+                );
+            }
+            return connectors.values().iterator().next();
         }
 
         private static String extractScheme(String location) {
