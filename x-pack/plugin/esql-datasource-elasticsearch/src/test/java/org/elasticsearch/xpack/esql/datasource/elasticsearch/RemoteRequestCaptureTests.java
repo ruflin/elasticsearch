@@ -27,6 +27,8 @@ import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
+import org.junit.After;
+import org.junit.Before;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -78,9 +80,8 @@ public class RemoteRequestCaptureTests extends ESTestCase {
     private String endpoint;
     private BlockFactory blockFactory;
 
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    @Before
+    public void startStubQueryServer() throws IOException {
         capturedBody = new AtomicReference<>();
         capturedAuthorization = new AtomicReference<>();
         blockFactory = BlockFactory.builder(BigArrays.NON_RECYCLING_INSTANCE).breaker(new NoopCircuitBreaker("none")).build();
@@ -98,10 +99,11 @@ public class RemoteRequestCaptureTests extends ESTestCase {
         endpoint = "http://" + InetAddress.getLoopbackAddress().getHostAddress() + ":" + server.getAddress().getPort();
     }
 
-    @Override
-    public void tearDown() throws Exception {
-        server.stop(0);
-        super.tearDown();
+    @After
+    public void stopStubQueryServer() {
+        if (server != null) {
+            server.stop(0);
+        }
     }
 
     /**
