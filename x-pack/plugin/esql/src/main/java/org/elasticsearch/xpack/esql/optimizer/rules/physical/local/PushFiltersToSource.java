@@ -23,6 +23,7 @@ import org.elasticsearch.xpack.esql.datasources.FormatNameResolver;
 import org.elasticsearch.xpack.esql.datasources.FormatReaderRegistry;
 import org.elasticsearch.xpack.esql.datasources.PhysicalNames;
 import org.elasticsearch.xpack.esql.datasources.spi.ErrorPolicy;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
 import org.elasticsearch.xpack.esql.expression.predicate.Predicates;
@@ -253,7 +254,7 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
 
         String formatName = resolveFormatName(externalExec.config(), externalExec.sourcePath());
         FormatReader formatReader = resolveFormatReader(formatName, ctx);
-        FilterPushdownSupport pushdownSupport = formatReader != null ? formatReader.filterPushdownSupport() : null;
+        FilterPushdownSupport pushdownSupport = resolveFilterPushdownSupport(formatReader, externalExec.sourceType(), ctx);
         if (pushdownSupport == null) {
             return filterExec;
         }
@@ -269,7 +270,10 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
         // signal the reader keys late materialization off, and by the time the factory sees the plan the FilterExec
         // for a Pushability.YES conjunct has already been dropped -- so the factory can neither suppress the filter
         // (rows would leak unfiltered) nor undo the late-mat decision it implies.
-        if (formatReader.dropsRowsUnderPushedFilter() == false
+        //
+        // Connector-based sources have no format reader, so this file-reader concern does not apply to them.
+        if (formatReader != null
+            && formatReader.dropsRowsUnderPushedFilter() == false
             && externalExec.declaredReadSpec().dropsRowsOnCoercionFailure(ErrorPolicy.forReader(externalExec.config(), formatReader))) {
             return filterExec;
         }
@@ -364,6 +368,33 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
     static FormatReader resolveFormatReader(String formatName, LocalPhysicalOptimizerContext ctx) {
         FormatReaderRegistry formatReaderRegistry = ctx == null || ctx.external() == null ? null : ctx.external().formatReaderRegistry();
         return formatReaderRegistry != null ? formatReaderRegistry.findByName(formatName) : null;
+    }
+
+    /**
+     * Resolves filter pushdown support for the source.
+     * <p>
+     * Connector-based sources (e.g. the elasticsearch connector) expose pushdown through their
+     * {@link ExternalSourceFactory#filterPushdownSupport()}, looked up by source type. File-based
+     * sources have no connector factory and instead expose it through their
+     * {@link FormatReader#filterPushdownSupport()}, looked up by format name.
+     * <p>
+     * The connector factory is consulted first: a connector's remote resource can look like a file
+     * path (e.g. {@code es://host:9200/logs.parquet}), and the format-reader lookup keys off that
+     * suffix, so checking the connector by source type first prevents misclassifying a connector
+     * source as a Parquet/CSV/etc. file.
+     */
+    private static FilterPushdownSupport resolveFilterPushdownSupport(
+        FormatReader formatReader,
+        String sourceType,
+        LocalPhysicalOptimizerContext ctx
+    ) {
+        if (ctx != null && ctx.external() != null) {
+            ExternalSourceFactory factory = sourceType == null ? null : ctx.external().sourceFactories().get(sourceType);
+            if (factory != null && factory.filterPushdownSupport() != null) {
+                return factory.filterPushdownSupport();
+            }
+        }
+        return formatReader != null ? formatReader.filterPushdownSupport() : null;
     }
 
     private static PhysicalPlan planFilterExec(FilterExec filterExec, ParameterizedQueryExec pqExec, LocalPhysicalOptimizerContext ctx) {

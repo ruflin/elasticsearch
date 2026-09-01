@@ -45,6 +45,13 @@ public interface FormatReader extends Closeable {
     int NO_LIMIT = -1;
 
     /**
+     * Sentinel probability meaning "no SAMPLE was pushed": keep every row. A pushed sample carries a
+     * probability in the open interval {@code (0, 1)}; {@code 1.0} (keep all) is the natural no-op and is
+     * used as the default so a source that ignores sampling behaves exactly as before.
+     */
+    double NO_SAMPLE = 1.0;
+
+    /**
      * Strategy for resolving schemas across multiple files in a glob/multi-file query.
      */
     enum SchemaResolution {

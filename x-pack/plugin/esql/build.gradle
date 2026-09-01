@@ -128,6 +128,7 @@ dependencies {
   internalClusterTestImplementation project(path: xpackModule('esql-datasource-gzip'))
   internalClusterTestImplementation project(path: xpackModule('esql-datasource-http'))
   internalClusterTestImplementation project(path: xpackModule('esql-datasource-parquet'))
+  internalClusterTestImplementation project(path: xpackModule('esql-datasource-elasticsearch'))
   internalClusterTestImplementation "org.apache.parquet:parquet-hadoop-bundle:${versions.parquet}"
   internalClusterTestImplementation("org.apache.hadoop:hadoop-common:${versions.hadoop}") { transitive = false }
   internalClusterTestImplementation("org.apache.hadoop:hadoop-mapreduce-client-core:${versions.hadoop}") { transitive = false }
@@ -213,6 +214,13 @@ tasks.named("internalClusterTest").configure {
   // See https://github.com/maxmind/MaxMind-DB-Reader-java#file-lock-on-windows for more information
   if (OS.current() == OS.WINDOWS) {
     systemProperty 'es.geoip.load_db_on_heap', 'true'
+  }
+
+  // Optional: point ElasticsearchExternalSourceLiveIT at a real remote cluster. The IT self-skips when unset.
+  ['tests.esql.remote.url', 'tests.esql.remote.apikey', 'tests.esql.remote.target'].each { key ->
+    if (System.getProperty(key) != null) {
+      systemProperty key, System.getProperty(key)
+    }
   }
 
   def injected = project.objects.newInstance(Injected)
