@@ -30,9 +30,3 @@ tasks.named('javaRestTest') {
   // Pass the ClickHouse URL through to the test so it can self-skip when no server is configured.
   nonInputProperties.systemProperty 'tests.clickhouse.url', providers.environmentVariable('CLICKHOUSE_URL').orElse('')
 }
-
-restResources {
-  restApi {
-    include '_common', 'bulk', 'get', 'indices', 'esql', 'xpack', 'cluster', 'capabilities', 'index'
-  }
-}

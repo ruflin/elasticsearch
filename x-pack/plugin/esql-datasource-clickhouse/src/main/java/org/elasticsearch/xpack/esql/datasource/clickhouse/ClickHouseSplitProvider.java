@@ -7,8 +7,8 @@
 
 package org.elasticsearch.xpack.esql.datasource.clickhouse;
 
-import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.SplitDiscoveryContext;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitDiscoveryResult;
 import org.elasticsearch.xpack.esql.datasources.spi.SplitProvider;
 
 import java.util.List;
@@ -26,10 +26,10 @@ import java.util.Objects;
 class ClickHouseSplitProvider implements SplitProvider {
 
     @Override
-    public List<ExternalSplit> discoverSplits(SplitDiscoveryContext context) {
+    public SplitDiscoveryResult discoverSplits(SplitDiscoveryContext context) {
         Object database = context.config().get("database");
         Object table = context.config().get("table");
         String target = Objects.toString(database, "default") + "." + Objects.toString(table, "");
-        return List.of(new ClickHouseSplit(target));
+        return SplitDiscoveryResult.of(List.of(new ClickHouseSplit(target)));
     }
 }

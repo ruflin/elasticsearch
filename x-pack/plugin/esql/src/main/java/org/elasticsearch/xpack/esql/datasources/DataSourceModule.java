@@ -28,6 +28,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.FormatReaderFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatSpec;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceOperatorFactoryProvider;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitProvider;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProvider;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
@@ -496,6 +497,14 @@ public final class DataSourceModule implements Closeable {
         @Override
         public SourceOperatorFactoryProvider operatorFactory() {
             return resolveDelegate().operatorFactory();
+        }
+
+        @Override
+        public SplitProvider splitProvider() {
+            // Must delegate: the default SplitProvider.SINGLE emits no splits. Connector plugins
+            // (Flight, ClickHouse) supply their own provider so the planner has a unit of work to
+            // schedule — without this, ungrouped aggregates such as STATS COUNT(*) return zero rows.
+            return resolveDelegate().splitProvider();
         }
 
         private ConnectorFactory resolveDelegate() {

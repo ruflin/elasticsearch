@@ -21,6 +21,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.Split;
+import org.junit.Before;
 
 import java.io.IOException;
 import java.net.URI;
@@ -55,9 +56,8 @@ public class ClickHouseConnectorTests extends ESTestCase {
 
     private BlockFactory blockFactory;
 
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    @Before
+    public void initBlockFactory() {
         blockFactory = BlockFactory.builder(BigArrays.NON_RECYCLING_INSTANCE).breaker(new NoopCircuitBreaker("none")).build();
     }
 
@@ -160,7 +160,6 @@ public class ClickHouseConnectorTests extends ESTestCase {
     private static void executeHttp(ClickHouseConnectorFactory.ParsedUri parsed, String sql) throws Exception {
         String scheme = parsed.tls() ? "https" : "http";
         URI uri = URI.create(scheme + "://" + parsed.host() + ":" + parsed.port() + "/");
-        HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build();
         HttpRequest request = HttpRequest.newBuilder()
             .uri(uri)
             .header("X-ClickHouse-User", DEFAULT_USER)
@@ -168,9 +167,11 @@ public class ClickHouseConnectorTests extends ESTestCase {
             .POST(HttpRequest.BodyPublishers.ofString(sql, StandardCharsets.UTF_8))
             .timeout(Duration.ofSeconds(30))
             .build();
-        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new IOException("ClickHouse returned HTTP " + response.statusCode() + ": " + response.body() + " for SQL: " + sql);
+        try (HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build()) {
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                throw new IOException("ClickHouse returned HTTP " + response.statusCode() + ": " + response.body() + " for SQL: " + sql);
+            }
         }
     }
 

@@ -68,8 +68,10 @@ public class ClickHouseDataSourcePlugin extends Plugin implements DataSourcePlug
     }
 
     @Override
-    public List<NamedWriteableRegistry.Entry> namedWriteables() {
+    public List<NamedWriteableRegistry.Entry> getNamedWriteables() {
         // ClickHouseSplit travels in the physical plan, so it must be registered for transport serialization.
+        // Plugin#getNamedWriteables is the registry the node actually consults; DataSourcePlugin#namedWriteables
+        // is unused on this branch.
         return List.of(ClickHouseSplit.ENTRY);
     }
 }

@@ -28,7 +28,9 @@ dependencies {
   compileOnly project(':server')
   compileOnly project(xpackModule('esql:compute'))
 
-  implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+  // Jackson is provided by the server / x-pack-esql classloader. Compile against it only so the
+  // plugin does not bundle a second copy (jar hell + license check).
+  compileOnly "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
 
   testImplementation project(':test:framework')
   testImplementation(testArtifact(project(xpackModule('core'))))
@@ -36,8 +38,4 @@ dependencies {
   testImplementation project(xpackModule('esql-core'))
   testImplementation project(xpackModule('esql:compute'))
   testImplementation project(xpackModule('esql:qa:testFixtures'))
-}
-
-tasks.named("dependencyLicenses").configure {
-  mapping from: /jackson-.*/, to: 'jackson'
 }
