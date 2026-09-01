@@ -230,7 +230,10 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
      * Skipped unless {@code -Dtests.esql.keep_clusters=true}.
      */
     public void testKeepClustersRunningForManualQuery() throws Exception {
-        assumeTrue("opt-in keep-alive for two running clusters", Booleans.parseBoolean(System.getProperty("tests.esql.keep_clusters")));
+        assumeTrue(
+            "opt-in keep-alive for two running clusters",
+            Booleans.parseBoolean(System.getProperty("tests.esql.keep_clusters"), false)
+        );
         assumeTrue("requires EXTERNAL command capability", EXTERNAL_COMMAND.isEnabled());
         assumeTrue("requires dataset-in-from-command capability", DATASET_IN_FROM_COMMAND.isEnabled());
 
