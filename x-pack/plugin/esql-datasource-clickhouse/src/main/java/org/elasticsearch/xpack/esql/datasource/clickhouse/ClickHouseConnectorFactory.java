@@ -33,6 +33,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -59,7 +60,15 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
 
     @Override
     public boolean canHandle(String location) {
-        return location.startsWith("clickhouse://") || location.startsWith("clickhouse+https://");
+        if (location == null) {
+            return false;
+        }
+        int sep = location.indexOf("://");
+        if (sep <= 0) {
+            return false;
+        }
+        String scheme = location.substring(0, sep).toLowerCase(Locale.ROOT);
+        return ClickHouseDataSourcePlugin.SCHEMES.contains(scheme);
     }
 
     @Override
@@ -126,14 +135,13 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
             HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
             if (response.statusCode() != 200) {
                 String errorBody = new String(response.body(), StandardCharsets.UTF_8);
-                throw new IllegalStateException("ClickHouse schema fetch failed (HTTP " + response.statusCode() + "): " + errorBody);
+                throw ClickHouseFailures.httpStatus(response.statusCode(), errorBody, "schema fetch failed");
             }
             return parseDescribeResponse(response.body());
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while fetching ClickHouse schema", e);
+            throw ClickHouseFailures.interrupted(e, "fetching ClickHouse schema");
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to fetch ClickHouse schema: " + e.getMessage(), e);
+            throw ClickHouseFailures.transport(e, "failed to fetch schema");
         }
     }
 
@@ -179,7 +187,11 @@ class ClickHouseConnectorFactory implements ConnectorFactory {
 
     static ParsedUri parseUri(String location) {
         URI uri = URI.create(location);
-        boolean tls = "clickhouse+https".equals(uri.getScheme());
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (ClickHouseDataSourcePlugin.SCHEMES.contains(scheme) == false) {
+            throw new IllegalArgumentException("ClickHouse URI must use scheme clickhouse or clickhouse+https: " + location);
+        }
+        boolean tls = "clickhouse+https".equals(scheme);
         String host = uri.getHost();
         if (host == null || host.isBlank()) {
             throw new IllegalArgumentException("ClickHouse URI missing host: " + location);

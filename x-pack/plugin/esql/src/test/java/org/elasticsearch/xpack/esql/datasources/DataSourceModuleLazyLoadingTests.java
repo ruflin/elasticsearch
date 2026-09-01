@@ -16,6 +16,8 @@ import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.compute.operator.CloseableIterator;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.encryption.spi.EncryptionService;
+import org.elasticsearch.xpack.esql.datasources.spi.ConfigKeyValidator;
+import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
@@ -217,6 +219,46 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         assertFalse("Storage factory should not be called yet", SPY_STORAGE_FACTORY_CALLED.get());
     }
 
+    public void testSourceFactoriesPreferredOverConnectors() {
+        AtomicBoolean sourceFactoriesCalled = new AtomicBoolean(false);
+        AtomicBoolean connectorsCalled = new AtomicBoolean(false);
+        ConnectorFactory factory = new StubConnectorFactory();
+        DataSourcePlugin plugin = new DataSourcePlugin() {
+            @Override
+            public Set<String> supportedConnectorSchemes() {
+                return Set.of("stub");
+            }
+
+            @Override
+            public Map<String, ExternalSourceFactory> sourceFactories(Settings settings) {
+                sourceFactoriesCalled.set(true);
+                return Map.of("stub", factory);
+            }
+
+            @Override
+            public Map<String, ConnectorFactory> connectors(Settings settings) {
+                connectorsCalled.set(true);
+                return Map.of();
+            }
+        };
+
+        DataSourceModule module = new DataSourceModule(
+            List.of(plugin),
+            DataSourceCapabilities.build(List.of(plugin)),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+
+        ExternalSourceFactory registered = module.sourceFactories().get("stub");
+        assertNotNull(registered);
+        assertEquals("stub", registered.type());
+        assertTrue("sourceFactories() should be consulted first", sourceFactoriesCalled.get());
+        assertFalse("connectors() should not be called when sourceFactories() supplies a factory", connectorsCalled.get());
+    }
+
     public void testConnectorSchemesInCapabilities() {
         DataSourcePlugin connectorPlugin = new DataSourcePlugin() {
             @Override
@@ -311,6 +353,33 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         public Map<String, FormatReaderFactory> formatReaders(Settings settings) {
             OTHER_FORMAT_FACTORY_CALLED.set(true);
             return Map.of("other", (s, bf) -> new StubFormatReader("other", List.of(".other")));
+        }
+    }
+
+    private static class StubConnectorFactory implements ConnectorFactory {
+        @Override
+        public String type() {
+            return "stub";
+        }
+
+        @Override
+        public boolean canHandle(String location) {
+            return location != null && location.startsWith("stub://");
+        }
+
+        @Override
+        public void validateConfig(String location, Map<String, Object> config) {
+            ConfigKeyValidator.check(config, List.of());
+        }
+
+        @Override
+        public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
+            throw new UnsupportedOperationException("Stub");
+        }
+
+        @Override
+        public Connector open(Map<String, Object> config) {
+            throw new UnsupportedOperationException("Stub");
         }
     }
 

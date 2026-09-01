@@ -30,6 +30,11 @@ public class ClickHouseConnectorFactoryTests extends ESTestCase {
         assertTrue(factory.canHandle("clickhouse+https://secure.example.com:8443/mydb/mytable"));
     }
 
+    public void testCanHandleIsCaseInsensitive() {
+        assertTrue(factory.canHandle("CLICKHOUSE://localhost:8123/mydb/mytable"));
+        assertTrue(factory.canHandle("ClickHouse+HTTPS://secure.example.com/mydb/mytable"));
+    }
+
     public void testCanHandleRejectsOtherSchemes() {
         assertFalse(factory.canHandle("http://example.com/data.parquet"));
         assertFalse(factory.canHandle("flight://server:9090/table"));
@@ -79,6 +84,12 @@ public class ClickHouseConnectorFactoryTests extends ESTestCase {
         ClickHouseConnectorFactory.ParsedUri p = ClickHouseConnectorFactory.parseUri("clickhouse+https://secure.host:8443/db/tbl");
         assertTrue(p.tls());
         assertEquals(8443, p.port());
+    }
+
+    public void testParseUriSchemeIsCaseInsensitive() {
+        ClickHouseConnectorFactory.ParsedUri p = ClickHouseConnectorFactory.parseUri("CLICKHOUSE+HTTPS://secure.host/db/tbl");
+        assertTrue(p.tls());
+        assertEquals(ClickHouseConnectorFactory.DEFAULT_HTTPS_PORT, p.port());
     }
 
     public void testParseUriDefaultHttpsPort() {

@@ -37,6 +37,9 @@ final class Clusters {
             // Federation is only on by default in snapshot builds; pin it so the CRUD APIs and
             // FROM <dataset> stay available regardless of how the distribution was built.
             .setting(Federation.FEDERATION_ENABLED.getKey(), "true")
+            // Plugin FeatureFlag is snapshot-on / release-off; pin so QA still loads the connector
+            // if this suite is run against a release-shaped distribution.
+            .systemProperty("es.esql_external_datasources_clickhouse_feature_flag_enabled", "true")
             // Configure a wrapping password so the master installs the PEK and secrets can be encrypted.
             .keystore("cluster.state.encryption.password." + ENCRYPTION_PASSWORD_ID, ENCRYPTION_PASSWORD)
             .keystore("cluster.state.encryption.active_password_id", ENCRYPTION_PASSWORD_ID)

@@ -17,7 +17,6 @@ import org.elasticsearch.xpack.esql.datasources.spi.Split;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -85,7 +84,7 @@ class ClickHouseConnector implements Connector {
             }
             return new ClickHouseResultCursor(new ByteArrayInputStream(body), request.attributes(), request.blockFactory());
         } catch (IOException e) {
-            throw new UncheckedIOException("ClickHouse response parse failed: " + e.getMessage(), e);
+            throw ClickHouseFailures.parse(e);
         }
     }
 
@@ -106,14 +105,13 @@ class ClickHouseConnector implements Connector {
             HttpResponse<byte[]> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofByteArray());
             if (response.statusCode() != 200) {
                 String errorBody = new String(response.body(), StandardCharsets.UTF_8);
-                throw new IOException("ClickHouse returned HTTP " + response.statusCode() + ": " + errorBody);
+                throw ClickHouseFailures.httpStatus(response.statusCode(), errorBody, "query failed");
             }
             return response.body();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while executing ClickHouse query", e);
+            throw ClickHouseFailures.interrupted(e, "executing ClickHouse query");
         } catch (IOException e) {
-            throw new UncheckedIOException("ClickHouse query failed: " + e.getMessage(), e);
+            throw ClickHouseFailures.transport(e, "query failed");
         }
     }
 

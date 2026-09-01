@@ -45,8 +45,8 @@ import java.util.Map;
  *     --tests "*ClickHouseConnectorTests*"
  * </pre>
  *
- * <p>A Docker Compose file is provided in {@code src/test/resources/docker/} for convenience.
- * Start it with: {@code docker compose -f src/test/resources/docker/docker-compose.yml up -d}
+ * <p>Start a local ClickHouse with {@code scripts/dev/clickhouse/seed.sh} (the unit tests seed
+ * their own table against whatever {@code CLICKHOUSE_URL} points at).
  */
 public class ClickHouseConnectorTests extends ESTestCase {
 
