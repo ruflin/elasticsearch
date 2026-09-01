@@ -256,6 +256,47 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         assertFalse(RecordingConnector.LAST_OPEN_CONFIG.get().containsKey(ExternalSourceResolver.DATASOURCE_CONFIG_KEY));
     }
 
+    public void testLazyConnectorLoadsFromSourceFactories() {
+        RecordingConnector.LAST_RESOLVE_CONFIG.set(null);
+        DataSourcePlugin plugin = new DataSourcePlugin() {
+            @Override
+            public Set<String> supportedConnectorSchemes() {
+                return Set.of("src");
+            }
+
+            @Override
+            public Map<String, ExternalSourceFactory> sourceFactories(Settings settings) {
+                return Map.of("src", new RecordingConnectorFactory() {
+                    @Override
+                    public String type() {
+                        return "src";
+                    }
+
+                    @Override
+                    public boolean canHandle(String location) {
+                        return location != null && location.startsWith("src://");
+                    }
+                });
+            }
+        };
+
+        List<DataSourcePlugin> plugins = List.of(plugin);
+        DataSourceModule module = new DataSourceModule(
+            plugins,
+            DataSourceCapabilities.build(plugins),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+
+        ExternalSourceFactory factory = module.sourceFactories().get("src");
+        assertTrue(factory instanceof DataSourceModule.LazyConnectorFactory);
+        factory.resolveMetadata("src://host/index", Map.of());
+        assertNotNull(RecordingConnector.LAST_RESOLVE_CONFIG.get());
+    }
+
     public void testConnectorSchemesInCapabilities() {
         DataSourcePlugin connectorPlugin = new DataSourcePlugin() {
             @Override

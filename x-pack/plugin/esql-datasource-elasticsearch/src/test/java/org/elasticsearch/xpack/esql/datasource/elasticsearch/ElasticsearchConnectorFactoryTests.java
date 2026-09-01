@@ -22,6 +22,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
+import org.junit.After;
 
 import java.io.IOException;
 import java.util.List;
@@ -30,6 +31,11 @@ import java.util.Map;
 public class ElasticsearchConnectorFactoryTests extends ESTestCase {
 
     private final ElasticsearchConnectorFactory factory = new ElasticsearchConnectorFactory();
+
+    @After
+    public void closeFactory() throws IOException {
+        factory.close();
+    }
 
     public void testType() {
         assertEquals("elasticsearch", factory.type());
@@ -177,6 +183,18 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
         } catch (IOException e) {
             throw new AssertionError(e);
         }
+    }
+
+    public void testOpenReusesPooledClient() throws IOException {
+        try (
+            Connector first = factory.open(Map.of("endpoint", "http://remote:9200"));
+            Connector second = factory.open(Map.of("endpoint", "http://remote:9200"))
+        ) {
+            assertNotNull(first);
+            assertNotNull(second);
+            assertEquals(1, factory.cachedClientCount());
+        }
+        assertEquals("closing a connector must not evict the pooled client", 1, factory.cachedClientCount());
     }
 
     public void testBuildRemoteQueryProjectsColumns() {

@@ -22,6 +22,7 @@ import org.elasticsearch.client.Response;
 import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.network.InetAddresses;
+import org.elasticsearch.core.IOUtils;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
 import org.elasticsearch.xcontent.json.JsonXContent;
@@ -33,6 +34,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -45,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Factory for the {@code elasticsearch} connector. Handles {@code es://} and {@code elasticsearch://}
@@ -55,7 +58,7 @@ import java.util.Set;
  * the resolved config and handed back to {@link #open} at execution time; credentials stay in the original query
  * config so encrypted data-source secrets are not copied into resolved metadata as plaintext.
  */
-class ElasticsearchConnectorFactory implements ConnectorFactory {
+class ElasticsearchConnectorFactory implements ConnectorFactory, Closeable {
 
     static final String CONFIG_ENDPOINT = "endpoint";
     static final String CONFIG_TARGET = "target";
@@ -67,6 +70,8 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 10_000;
     static final int DEFAULT_SOCKET_TIMEOUT_MILLIS = 60_000;
     private static final int CONNECTION_REQUEST_TIMEOUT_MILLIS = 10_000;
+
+    private final ConcurrentHashMap<ClientKey, RestClient> clients = new ConcurrentHashMap<>();
 
     @Override
     public String type() {
@@ -143,8 +148,8 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
         validateConfig(location, config);
         Endpoint endpoint = parseLocation(location);
-        try (RestClient client = buildClient(endpoint.baseUrl(), apiKey(config), config)) {
-            List<Attribute> attributes = resolveSchema(client, endpoint.target());
+        try {
+            List<Attribute> attributes = resolveSchema(clientFor(endpoint.baseUrl(), apiKey(config), config), endpoint.target());
             Map<String, Object> resolvedConfig = new HashMap<>();
             resolvedConfig.put(CONFIG_ENDPOINT, endpoint.baseUrl());
             resolvedConfig.put(CONFIG_TARGET, endpoint.target());
@@ -173,7 +178,19 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
         if (baseUrl == null) {
             throw new IllegalArgumentException("Elasticsearch connector requires '" + CONFIG_ENDPOINT + "' in config");
         }
-        return new ElasticsearchConnector(buildClient(baseUrl, apiKey(config), config));
+        return new ElasticsearchConnector(clientFor(baseUrl, apiKey(config), config));
+    }
+
+    @Override
+    public void close() throws IOException {
+        List<RestClient> snapshot = List.copyOf(clients.values());
+        clients.clear();
+        IOUtils.close(snapshot);
+    }
+
+    /** Test hook: how many pooled clients this factory currently holds. */
+    int cachedClientCount() {
+        return clients.size();
     }
 
     /**
@@ -203,24 +220,25 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
      * {@value #CONFIG_CONNECT_TIMEOUT_MILLIS} and {@value #CONFIG_SOCKET_TIMEOUT_MILLIS} config keys, so a slow remote
      * cluster or an expensive aggregation does not time out under the defaults.
      * <p>
-     * <b>v1 limitations.</b> A fresh client (and thus a fresh HTTP connection pool) is built per schema resolution and
-     * per query execution; clients are not pooled or reused across queries to the same endpoint, so each query pays a
-     * TCP+TLS setup cost. HTTPS uses the default JVM trust store only — there is no hook yet for a custom CA, disabling
-     * verification, or client-certificate auth, so self-hosted clusters behind a private CA are not reachable. Both are
-     * tracked for a follow-up.
+     * <b>v1 limitations.</b> HTTPS uses the default JVM trust store only — there is no hook yet for a custom CA,
+     * disabling verification, or client-certificate auth, so self-hosted clusters behind a private CA are not reachable.
      */
-    private static RestClient buildClient(String baseUrl, String apiKey, Map<String, Object> config) {
+    private RestClient clientFor(String baseUrl, String apiKey, Map<String, Object> config) {
         int connectTimeout = intConfig(config, CONFIG_CONNECT_TIMEOUT_MILLIS, DEFAULT_CONNECT_TIMEOUT_MILLIS);
         int socketTimeout = intConfig(config, CONFIG_SOCKET_TIMEOUT_MILLIS, DEFAULT_SOCKET_TIMEOUT_MILLIS);
-        var builder = RestClient.builder(HttpHost.create(baseUrl));
+        return clients.computeIfAbsent(new ClientKey(baseUrl, apiKey, connectTimeout, socketTimeout), key -> buildClient(key));
+    }
+
+    private static RestClient buildClient(ClientKey key) {
+        var builder = RestClient.builder(HttpHost.create(key.baseUrl()));
         builder.setRequestConfigCallback(
-            requestConfig -> requestConfig.setConnectTimeout(connectTimeout)
-                .setSocketTimeout(socketTimeout)
+            requestConfig -> requestConfig.setConnectTimeout(key.connectTimeoutMillis())
+                .setSocketTimeout(key.socketTimeoutMillis())
                 .setConnectionRequestTimeout(CONNECTION_REQUEST_TIMEOUT_MILLIS)
         );
         builder.setHttpClientConfigCallback(ElasticsearchConnectorFactory::installLinkLocalSafeDnsResolver);
-        if (apiKey != null) {
-            builder.setDefaultHeaders(new Header[] { new BasicHeader("Authorization", "ApiKey " + apiKey) });
+        if (key.apiKey() != null) {
+            builder.setDefaultHeaders(new Header[] { new BasicHeader("Authorization", "ApiKey " + key.apiKey()) });
         }
         return builder.build();
     }
@@ -394,4 +412,6 @@ class ElasticsearchConnectorFactory implements ConnectorFactory {
     }
 
     record Endpoint(String baseUrl, String target) {}
+
+    private record ClientKey(String baseUrl, String apiKey, int connectTimeoutMillis, int socketTimeoutMillis) {}
 }

@@ -79,6 +79,7 @@ public class RemoteRequestCaptureTests extends ESTestCase {
     private AtomicReference<String> capturedAuthorization;
     private String endpoint;
     private BlockFactory blockFactory;
+    private ElasticsearchConnectorFactory factory;
 
     @Before
     public void startStubQueryServer() throws IOException {
@@ -97,10 +98,14 @@ public class RemoteRequestCaptureTests extends ESTestCase {
         });
         server.start();
         endpoint = "http://" + InetAddress.getLoopbackAddress().getHostAddress() + ":" + server.getAddress().getPort();
+        factory = new ElasticsearchConnectorFactory();
     }
 
     @After
-    public void stopStubQueryServer() {
+    public void stopStubQueryServer() throws IOException {
+        if (factory != null) {
+            factory.close();
+        }
         if (server != null) {
             server.stop(0);
         }
@@ -189,7 +194,7 @@ public class RemoteRequestCaptureTests extends ESTestCase {
     }
 
     private ElasticsearchConnectorFactory factory() {
-        return new ElasticsearchConnectorFactory();
+        return factory;
     }
 
     private String location(String target) {

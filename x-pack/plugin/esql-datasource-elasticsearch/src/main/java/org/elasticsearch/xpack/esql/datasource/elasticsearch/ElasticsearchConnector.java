@@ -537,8 +537,8 @@ class ElasticsearchConnector implements Connector {
     }
 
     @Override
-    public void close() throws IOException {
-        client.close();
+    public void close() {
+        // The factory owns the pooled RestClient and closes it when the plugin shuts down.
     }
 
     /** A {@link ResultCursor} that yields at most one already-materialized {@link Page}. */

@@ -45,8 +45,10 @@ import org.elasticsearch.xpack.esql.datasources.cache.SchemaCacheKey;
 import org.elasticsearch.xpack.esql.datasources.glob.GlobExpander;
 import org.elasticsearch.xpack.esql.datasources.spi.AggregatePushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.Configured;
+import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
 import org.elasticsearch.xpack.esql.datasources.spi.DecompressionCodec;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalUnavailableException;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReadContext;
@@ -146,6 +148,73 @@ public class ExternalSourceResolverTests extends ESTestCase {
     public void testCoercingFileTypedFormatsPinned() {
         assertEquals(Set.of(FormatNameResolver.FORMAT_PARQUET, "orc"), ExternalSourceResolver.COERCING_FILE_TYPED_FORMATS);
         assertTrue(ExternalSourceResolver.FILE_TYPED_FORMATS.containsAll(ExternalSourceResolver.COERCING_FILE_TYPED_FORMATS));
+    }
+
+    /**
+     * A connector plugin that registers no storage provider must still resolve: the factory supplies
+     * schema and the listing stays {@link FileList#UNRESOLVED} because connectors are not byte-addressable.
+     */
+    public void testConnectorResolvesWithoutStorageProvider() {
+        String location = "rec://host:9200/logs*";
+        DataSourcePlugin plugin = new DataSourcePlugin() {
+            @Override
+            public Set<String> supportedConnectorSchemes() {
+                return Set.of("rec");
+            }
+
+            @Override
+            public Map<String, ExternalSourceFactory> sourceFactories(Settings settings) {
+                return Map.of("rec", new ConnectorFactory() {
+                    @Override
+                    public String type() {
+                        return "rec";
+                    }
+
+                    @Override
+                    public boolean canHandle(String path) {
+                        return path != null && path.startsWith("rec://");
+                    }
+
+                    @Override
+                    public void validateConfig(String path, Map<String, Object> config) {}
+
+                    @Override
+                    public SourceMetadata resolveMetadata(String path, Map<String, Object> config) {
+                        return new SimpleSourceMetadata(
+                            List.of(new ReferenceAttribute(Source.EMPTY, null, "name", DataType.KEYWORD, Nullability.TRUE, null, false)),
+                            "rec",
+                            path
+                        );
+                    }
+
+                    @Override
+                    public org.elasticsearch.xpack.esql.datasources.spi.Connector open(Map<String, Object> config) {
+                        throw new UnsupportedOperationException();
+                    }
+                });
+            }
+        };
+
+        List<DataSourcePlugin> plugins = List.of(plugin);
+        DataSourceModule module = new DataSourceModule(
+            plugins,
+            DataSourceCapabilities.build(plugins),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+        ExternalSourceResolver resolver = new ExternalSourceResolver(EsExecutors.DIRECT_EXECUTOR_SERVICE, module, Settings.EMPTY, null);
+
+        PlainActionFuture<ExternalSourceResolution> future = new PlainActionFuture<>();
+        resolver.resolve(List.of(location), Map.of(location, Map.of()), future);
+        ExternalSourceResolution.ResolvedSource resolved = future.actionGet().resolvedSource(location);
+        assertNotNull(resolved);
+        assertSame(FileList.UNRESOLVED, resolved.fileList());
+        assertEquals("rec", resolved.metadata().sourceType());
+        assertEquals(List.of("name"), resolved.metadata().schema().stream().map(Attribute::name).toList());
+        assertFalse("connector schemes must not require a storage provider", module.storageProviderRegistry().hasProvider("rec"));
     }
 
     // ===== Declared date `format` on a columnar column (rejectUncoercibleFileTypedRetypes) =====

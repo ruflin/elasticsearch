@@ -381,6 +381,7 @@ public final class DataSourceModule implements Closeable {
         private volatile Map<String, StorageProviderFactory> storageFactoriesCache;
         private volatile Map<String, FormatReaderFactory> formatFactoriesCache;
         private volatile Map<String, ConnectorFactory> connectorFactoriesCache;
+        private volatile Map<String, ExternalSourceFactory> sourceFactoriesCache;
         private volatile Map<String, TableCatalogFactory> catalogFactoriesCache;
 
         LazyPluginState(
@@ -430,6 +431,17 @@ public final class DataSourceModule implements Closeable {
                 }
             }
             return connectorFactoriesCache;
+        }
+
+        Map<String, ExternalSourceFactory> pluginSourceFactories() {
+            if (sourceFactoriesCache == null) {
+                synchronized (this) {
+                    if (sourceFactoriesCache == null) {
+                        sourceFactoriesCache = plugin.sourceFactories(settings);
+                    }
+                }
+            }
+            return sourceFactoriesCache;
         }
 
         Map<String, TableCatalogFactory> catalogFactories() {
@@ -555,7 +567,14 @@ public final class DataSourceModule implements Closeable {
                     if (delegate == null) {
                         Map<String, ConnectorFactory> connectors = state.connectorFactories();
                         if (connectors.isEmpty()) {
-                            throw new IllegalStateException("Plugin " + pluginName + " declared schemes but connectors() returned empty");
+                            // Plugins that have migrated off connectors() register the factory via
+                            // sourceFactories(); accept a single ConnectorFactory from that map.
+                            connectors = connectorFactoriesFrom(state.pluginSourceFactories());
+                        }
+                        if (connectors.isEmpty()) {
+                            throw new IllegalStateException(
+                                "Plugin " + pluginName + " declared schemes but connectors()/sourceFactories() returned no connector"
+                            );
                         }
                         if (connectors.size() > 1) {
                             throw new IllegalStateException(
@@ -571,6 +590,16 @@ public final class DataSourceModule implements Closeable {
                 }
             }
             return delegate;
+        }
+
+        private static Map<String, ConnectorFactory> connectorFactoriesFrom(Map<String, ExternalSourceFactory> factories) {
+            Map<String, ConnectorFactory> connectors = new LinkedHashMap<>();
+            for (Map.Entry<String, ExternalSourceFactory> entry : factories.entrySet()) {
+                if (entry.getValue() instanceof ConnectorFactory connectorFactory) {
+                    connectors.put(entry.getKey(), connectorFactory);
+                }
+            }
+            return connectors;
         }
 
         private static String extractScheme(String location) {
