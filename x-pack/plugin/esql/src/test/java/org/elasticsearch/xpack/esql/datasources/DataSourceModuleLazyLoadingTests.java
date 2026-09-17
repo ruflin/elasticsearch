@@ -16,6 +16,7 @@ import org.elasticsearch.compute.data.Page;
 import org.elasticsearch.compute.operator.CloseableIterator;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xpack.encryption.spi.EncryptionService;
+import org.elasticsearch.xpack.esql.datasources.spi.ConfigKeyValidator;
 import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourcePlugin;
@@ -27,6 +28,8 @@ import org.elasticsearch.xpack.esql.datasources.spi.NoConfigFormatReader;
 import org.elasticsearch.xpack.esql.datasources.spi.PassThroughRowPositionStrategy;
 import org.elasticsearch.xpack.esql.datasources.spi.RowPositionStrategy;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitDiscoveryResult;
+import org.elasticsearch.xpack.esql.datasources.spi.SplitProvider;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageObject;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProvider;
@@ -313,6 +316,38 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         assertEquals(List.of("warning for [warn://table]"), warnings);
     }
 
+    /**
+     * Connector plugins that emit a real split (Flight, ClickHouse) override {@code splitProvider()}.
+     * The lazy wrapper must forward that rather than inheriting {@link SplitProvider#SINGLE}, which
+     * emits no splits and would make ungrouped {@code STATS COUNT(*)} return zero rows.
+     */
+    public void testLazyConnectorFactoryDelegatesSplitProvider() {
+        SplitProvider custom = ctx -> SplitDiscoveryResult.EMPTY;
+        DataSourcePlugin plugin = new DataSourcePlugin() {
+            @Override
+            public Set<String> supportedConnectorSchemes() {
+                return Set.of("split");
+            }
+
+            @Override
+            public Map<String, ConnectorFactory> connectors(Settings settings) {
+                return Map.of("split", new SplitDelegatingConnectorFactory(custom));
+            }
+        };
+        DataSourceModule module = new DataSourceModule(
+            List.of(plugin),
+            DataSourceCapabilities.build(List.of(plugin)),
+            Settings.EMPTY,
+            blockFactory,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE,
+            new DataSourceCredentials(ENCRYPTION_SERVICE),
+            () -> false
+        );
+        ExternalSourceFactory wrapper = module.sourceFactories().get("split");
+        assertThat(wrapper, instanceOf(DataSourceModule.LazyConnectorFactory.class));
+        assertSame(custom, wrapper.splitProvider());
+    }
+
     public void testLazyTableCatalogWrapperForwardsWarningSink() {
         DataSourcePlugin plugin = new DataSourcePlugin() {
             @Override
@@ -419,6 +454,45 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         @Override
         public void validateConfig(String location, Map<String, Object> config, Consumer<String> warningSink) {
             warningSink.accept("warning for [" + location + "]");
+        }
+    }
+
+    /** Connector factory whose only behaviour is a caller-supplied {@link SplitProvider}. */
+    private static class SplitDelegatingConnectorFactory implements ConnectorFactory {
+        private final SplitProvider splitProvider;
+
+        SplitDelegatingConnectorFactory(SplitProvider splitProvider) {
+            this.splitProvider = splitProvider;
+        }
+
+        @Override
+        public String type() {
+            return "split";
+        }
+
+        @Override
+        public boolean canHandle(String location) {
+            return location != null && location.startsWith("split://");
+        }
+
+        @Override
+        public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
+            throw new UnsupportedOperationException("Stub");
+        }
+
+        @Override
+        public Connector open(Map<String, Object> config) {
+            throw new UnsupportedOperationException("Stub");
+        }
+
+        @Override
+        public void validateConfig(String location, Map<String, Object> config) {
+            ConfigKeyValidator.check(config, List.of());
+        }
+
+        @Override
+        public SplitProvider splitProvider() {
+            return splitProvider;
         }
     }
 
