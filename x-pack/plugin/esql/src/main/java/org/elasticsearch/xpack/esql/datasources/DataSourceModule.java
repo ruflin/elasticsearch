@@ -537,7 +537,9 @@ public final class DataSourceModule implements Closeable {
         public void validateConfig(String location, Map<String, Object> config, Consumer<String> warningSink) {
             // Forward the sink rather than inheriting the interface default, which would drop it and
             // fall back to the two-argument form -- losing the resolver's buffered warning routing.
-            resolveDelegate().validateConfig(location, credentials.decryptInPlace(config), warningSink);
+            // Flatten _datasource then decrypt, matching resolveMetadata/open: the resolver always
+            // calls this form, so named-datasource queries would otherwise reject the carrier key.
+            resolveDelegate().validateConfig(location, connectorConfig(config), warningSink);
         }
 
         @Override

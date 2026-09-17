@@ -378,10 +378,10 @@ public class PushFiltersToSource extends PhysicalOptimizerRules.ParameterizedOpt
      * looks like a file (e.g. {@code es://host:9200/logs.parquet}) is not misclassified as Parquet.
      */
     private static FilterPushdownSupport resolveConnectorFilterPushdownSupport(String sourceType, LocalPhysicalOptimizerContext ctx) {
-        if (ctx == null || ctx.external() == null || sourceType == null) {
+        if (ctx == null || ctx.external() == null) {
             return null;
         }
-        ExternalSourceFactory factory = ctx.external().sourceFactories().get(sourceType);
+        ExternalSourceFactory factory = ctx.external().factoryFor(sourceType);
         return factory != null ? factory.filterPushdownSupport() : null;
     }
 

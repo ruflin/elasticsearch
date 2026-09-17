@@ -88,4 +88,20 @@ public class ElasticsearchDataSourceValidatorTests extends ESTestCase {
         assertThat(validator.validateDataset(Map.of(), "es+https://host:443/logs*", Map.of()), equalTo(Map.of()));
         assertThat(validator.validateDataset(Map.of(), "es://localhost:9200/metrics-*", null), equalTo(Map.of()));
     }
+
+    public void testAuthModeAnonymousWhenNoApiKey() {
+        assertThat(validator.authModeOrNull(Map.of()), equalTo("anonymous"));
+        assertThat(validator.authModeOrNull(null), equalTo("anonymous"));
+    }
+
+    public void testAuthModeStaticCredentialsWhenApiKeyStored() {
+        Map<String, DataSourceSetting> stored = validator.validateDatasource(Map.of("api_key", "encoded-key"));
+        assertThat(validator.authModeOrNull(stored), equalTo("static_credentials"));
+    }
+
+    public void testDatasourceUpdateOmittingApiKeyReturnsEmptyMap() {
+        // Caller carries the stored secret forward; this method reports only the fields in the request.
+        Map<String, DataSourceSetting> stored = validator.validateDatasource(Map.of(), Set.of("api_key"));
+        assertThat(stored, equalTo(Map.of()));
+    }
 }

@@ -13,6 +13,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.DataSourceConfigDefinition;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourceConfiguration;
 
 import java.util.Map;
+import java.util.Set;
 
 import static org.elasticsearch.xpack.esql.datasources.spi.DataSourceConfigDefinition.secret;
 
@@ -37,8 +38,20 @@ public class ElasticsearchConfiguration extends DataSourceConfiguration {
         super(raw, FIELDS);
     }
 
+    private ElasticsearchConfiguration(Map<String, Object> raw, Set<String> preexistingSecretKeys) {
+        super(raw, FIELDS, preexistingSecretKeys);
+    }
+
     public static ElasticsearchConfiguration fromMap(Map<String, Object> raw) {
         return raw == null || raw.isEmpty() ? null : new ElasticsearchConfiguration(raw);
+    }
+
+    /**
+     * PUT-as-update factory: a secret omitted from {@code raw} is still treated as present when its
+     * name is in {@code preexistingSecretKeys}, matching other secret-bearing data source configurations.
+     */
+    public static ElasticsearchConfiguration fromMap(Map<String, Object> raw, Set<String> preexistingSecretKeys) {
+        return raw == null || raw.isEmpty() ? null : new ElasticsearchConfiguration(raw, preexistingSecretKeys);
     }
 
     /** Lenient factory for query-time config maps that may carry keys this configuration does not own. */

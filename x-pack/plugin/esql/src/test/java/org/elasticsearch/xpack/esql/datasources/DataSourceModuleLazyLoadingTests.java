@@ -260,6 +260,11 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         lazy.open(config);
         assertEquals("secret-key", RecordingConnector.LAST_OPEN_CONFIG.get().get("api_key"));
         assertFalse(RecordingConnector.LAST_OPEN_CONFIG.get().containsKey(ExternalSourceResolver.DATASOURCE_CONFIG_KEY));
+
+        // The resolver always calls the warning-sink form of validateConfig; it must flatten too.
+        lazy.validateConfig("rec://host/index", config, warning -> {});
+        assertEquals("secret-key", RecordingConnector.LAST_VALIDATE_CONFIG.get().get("api_key"));
+        assertFalse(RecordingConnector.LAST_VALIDATE_CONFIG.get().containsKey(ExternalSourceResolver.DATASOURCE_CONFIG_KEY));
     }
 
     public void testConnectorSchemesInCapabilities() {
@@ -596,7 +601,9 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         }
 
         @Override
-        public void validateConfig(String location, Map<String, Object> config) {}
+        public void validateConfig(String location, Map<String, Object> config) {
+            RecordingConnector.LAST_VALIDATE_CONFIG.set(Map.copyOf(config));
+        }
 
         @Override
         public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
@@ -615,6 +622,8 @@ public class DataSourceModuleLazyLoadingTests extends ESTestCase {
         static final java.util.concurrent.atomic.AtomicReference<Map<String, Object>> LAST_RESOLVE_CONFIG =
             new java.util.concurrent.atomic.AtomicReference<>();
         static final java.util.concurrent.atomic.AtomicReference<Map<String, Object>> LAST_OPEN_CONFIG =
+            new java.util.concurrent.atomic.AtomicReference<>();
+        static final java.util.concurrent.atomic.AtomicReference<Map<String, Object>> LAST_VALIDATE_CONFIG =
             new java.util.concurrent.atomic.AtomicReference<>();
 
         @Override

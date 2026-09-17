@@ -1,0 +1,4 @@
+ALL-UNNAMED:
+  # RestClient's async IO reactor starts its own threads, matching the gRPC connector policy.
+  - manage_threads
+  - outbound_network

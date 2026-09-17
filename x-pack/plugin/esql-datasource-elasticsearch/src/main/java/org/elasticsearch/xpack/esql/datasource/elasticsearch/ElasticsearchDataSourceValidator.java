@@ -12,6 +12,7 @@ import org.elasticsearch.xpack.esql.datasources.metadata.DataSourceSetting;
 import org.elasticsearch.xpack.esql.datasources.spi.DataSourceValidator;
 
 import java.util.Map;
+import java.util.Set;
 
 /**
  * CRUD-time validator for the {@code elasticsearch} named data source.
@@ -31,10 +32,25 @@ public class ElasticsearchDataSourceValidator implements DataSourceValidator {
 
     @Override
     public Map<String, DataSourceSetting> validateDatasource(Map<String, Object> datasourceSettings) {
+        return validateDatasource(datasourceSettings, Set.of());
+    }
+
+    @Override
+    public Map<String, DataSourceSetting> validateDatasource(Map<String, Object> datasourceSettings, Set<String> existingSecretKeys) {
         // Rejects unknown keys and classifies api_key as a secret so it is encrypted into cluster state.
-        // An empty map is allowed: an anonymous remote cluster needs no stored credential.
-        ElasticsearchConfiguration config = ElasticsearchConfiguration.fromMap(datasourceSettings);
+        // An empty map is allowed: an anonymous remote cluster needs no stored credential. PUT-as-update
+        // omits an already-stored api_key; {@code existingSecretKeys} keeps completeness checks passing.
+        ElasticsearchConfiguration config = ElasticsearchConfiguration.fromMap(datasourceSettings, existingSecretKeys);
         return config != null ? config.toStoredSettings() : Map.of();
+    }
+
+    @Override
+    public String authModeOrNull(Map<String, DataSourceSetting> stored) {
+        // Closed inventory tokens: anonymous vs static_credentials (a stored api_key).
+        if (stored != null && stored.containsKey(ElasticsearchConfiguration.API_KEY.name())) {
+            return "static_credentials";
+        }
+        return "anonymous";
     }
 
     @Override
