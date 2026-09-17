@@ -586,6 +586,7 @@ tasks.register("checkBuildLogic").configure {
     ':x-pack:plugin:esql-datasource-azure',
     ':x-pack:plugin:esql-datasource-brotli',
     ':x-pack:plugin:esql-datasource-bzip2',
+    ':x-pack:plugin:esql-datasource-clickhouse',
     ':x-pack:plugin:esql-datasource-compression-libs',
     ':x-pack:plugin:esql-datasource-csv',
     ':x-pack:plugin:esql-datasource-gcs',
@@ -599,6 +600,7 @@ tasks.register("checkBuildLogic").configure {
     ':x-pack:plugin:esql-datasource-orc',
   ],
   releaseTestCheckEsqlDatasourceQa: [
+    ':x-pack:plugin:esql-datasource-clickhouse:qa',
     ':x-pack:plugin:esql-datasource-csv:qa',
     ':x-pack:plugin:esql-datasource-iceberg:qa',
     ':x-pack:plugin:esql-datasource-ndjson:qa',
