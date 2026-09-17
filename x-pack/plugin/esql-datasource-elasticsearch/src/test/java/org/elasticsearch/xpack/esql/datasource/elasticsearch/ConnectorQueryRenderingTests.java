@@ -20,6 +20,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
+import org.junit.Before;
 
 import java.util.List;
 import java.util.Map;
@@ -50,9 +51,8 @@ public class ConnectorQueryRenderingTests extends ESTestCase {
 
     private BlockFactory blockFactory;
 
-    @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    @Before
+    public void initBlockFactory() {
         blockFactory = BlockFactory.builder(BigArrays.NON_RECYCLING_INSTANCE).breaker(new NoopCircuitBreaker("none")).build();
     }
 
