@@ -101,6 +101,18 @@ public class ClickHouseDataSourceValidatorTests extends AbstractDataSourceValida
         expectThrows(ValidationException.class, () -> validator.validateDatasource(Map.of("password", "bad\nvalue")));
     }
 
+    /**
+     * ClickHouse datasets take no settings, so omitted and empty maps both round-trip as empty.
+     * The base test asserts {@code schema_resolution=first_file_wins}, which is file-source vocabulary.
+     */
+    @Override
+    public void testValidateDatasetNullSettings() {
+        Map<String, Object> first = validator().validateDataset(Map.of(), sampleResource(), null);
+        Map<String, Object> second = validator().validateDataset(Map.of(), sampleResource(), Map.of());
+        assertEquals(Map.of(), first);
+        assertEquals(first, second);
+    }
+
     public void testValidateDatasetValid() {
         assertTrue(validator.validateDataset(Map.of(), sampleResource(), Map.of()).isEmpty());
         assertTrue(validator.validateDataset(Map.of(), "clickhouse+https://secure.host:8443/db/tbl", Map.of()).isEmpty());

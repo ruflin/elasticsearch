@@ -78,48 +78,48 @@ public class ClickHouseConnectorTests extends ESTestCase {
         try {
             // Verify schema discovery
             try (ClickHouseConnectorFactory factory = new ClickHouseConnectorFactory()) {
-            Map<String, Object> userConfig = Map.of("user", DEFAULT_USER, "password", DEFAULT_PASSWORD);
-            SourceMetadata metadata = factory.resolveMetadata(clickhouseUrl, userConfig);
+                Map<String, Object> userConfig = Map.of("user", DEFAULT_USER, "password", DEFAULT_PASSWORD);
+                SourceMetadata metadata = factory.resolveMetadata(clickhouseUrl, userConfig);
 
-            assertNotNull(metadata);
-            assertEquals("clickhouse", metadata.sourceType());
-            assertTrue("Expected at least 3 columns", metadata.schema().size() >= 3);
+                assertNotNull(metadata);
+                assertEquals("clickhouse", metadata.sourceType());
+                assertTrue("Expected at least 3 columns", metadata.schema().size() >= 3);
 
-            List<Attribute> attrs = metadata.schema();
-            assertNotNull(findAttr(attrs, "emp_no"));
-            assertNotNull(findAttr(attrs, "first_name"));
-            assertNotNull(findAttr(attrs, "salary"));
+                List<Attribute> attrs = metadata.schema();
+                assertNotNull(findAttr(attrs, "emp_no"));
+                assertNotNull(findAttr(attrs, "first_name"));
+                assertNotNull(findAttr(attrs, "salary"));
 
-            // Verify data query
-            Map<String, Object> resolvedConfig = metadata.config();
-            try (Connector connector = factory.open(resolvedConfig)) {
-                List<String> projected = List.of("emp_no", "first_name", "salary");
-                List<Attribute> projectedAttrs = List.of(
-                    findAttr(attrs, "emp_no"),
-                    findAttr(attrs, "first_name"),
-                    findAttr(attrs, "salary")
-                );
+                // Verify data query
+                Map<String, Object> resolvedConfig = metadata.config();
+                try (Connector connector = factory.open(resolvedConfig)) {
+                    List<String> projected = List.of("emp_no", "first_name", "salary");
+                    List<Attribute> projectedAttrs = List.of(
+                        findAttr(attrs, "emp_no"),
+                        findAttr(attrs, "first_name"),
+                        findAttr(attrs, "salary")
+                    );
 
-                QueryRequest request = new QueryRequest(table, projected, projectedAttrs, resolvedConfig, 100, 10, blockFactory);
-                try (ResultCursor cursor = connector.execute(request, Split.SINGLE)) {
-                    assertTrue("Expected at least one page of results", cursor.hasNext());
-                    Page page = cursor.next();
-                    assertTrue("Expected at least 1 row", page.getPositionCount() >= 1);
-                    assertTrue("Expected at most 10 rows (LIMIT applied)", page.getPositionCount() <= 10);
+                    QueryRequest request = new QueryRequest(table, projected, projectedAttrs, resolvedConfig, 100, 10, blockFactory);
+                    try (ResultCursor cursor = connector.execute(request, Split.SINGLE)) {
+                        assertTrue("Expected at least one page of results", cursor.hasNext());
+                        Page page = cursor.next();
+                        assertTrue("Expected at least 1 row", page.getPositionCount() >= 1);
+                        assertTrue("Expected at most 10 rows (LIMIT applied)", page.getPositionCount() <= 10);
 
-                    try {
-                        IntBlock empNos = (IntBlock) page.getBlock(0);
-                        BytesRefBlock names = (BytesRefBlock) page.getBlock(1);
-                        for (int i = 0; i < page.getPositionCount(); i++) {
-                            assertTrue("emp_no should be positive", empNos.getInt(i) > 0);
-                            BytesRef name = names.getBytesRef(i, new BytesRef());
-                            assertNotNull("first_name should not be null", name);
+                        try {
+                            IntBlock empNos = (IntBlock) page.getBlock(0);
+                            BytesRefBlock names = (BytesRefBlock) page.getBlock(1);
+                            for (int i = 0; i < page.getPositionCount(); i++) {
+                                assertTrue("emp_no should be positive", empNos.getInt(i) > 0);
+                                BytesRef name = names.getBytesRef(i, new BytesRef());
+                                assertNotNull("first_name should not be null", name);
+                            }
+                        } finally {
+                            page.releaseBlocks();
                         }
-                    } finally {
-                        page.releaseBlocks();
                     }
                 }
-            }
             }
         } finally {
             dropTestData(parsed, database, table);
