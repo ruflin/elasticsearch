@@ -1,0 +1,28 @@
+# ClickHouse server for the ES|QL ClickHouse data source demo.
+#
+# Started by scripts/dev/clickhouse/seed.sh. The default user has no
+# password (matching CLICKHOUSE_USER/CLICKHOUSE_PASSWORD below), so the demo registers
+# the data source with the default credentials. init-logs.sql seeds a logs.app_logs table.
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: esql-ds-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./init-logs.sql:/docker-entrypoint-initdb.d/init-logs.sql
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
