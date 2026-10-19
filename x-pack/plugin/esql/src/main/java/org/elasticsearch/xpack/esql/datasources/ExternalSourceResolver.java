@@ -1333,7 +1333,9 @@ public class ExternalSourceResolver {
         // expansion, cache listing, or any footer read.
         throwIfCancelled();
 
-        if (GlobExpander.isMultiFile(path)) {
+        // Connectors that resolve their own patterns (e.g. an Elasticsearch index pattern like logs*)
+        // must not be glob-expanded against the storage provider; pass the pattern through as one source.
+        if (GlobExpander.isMultiFile(path) && expandsPatternRemotely(path, config) == false) {
             resolveMultiFileSource(path, config, hints, folderRange, declaredMapping, demand, schemaInterner, listener);
         } else {
             resolveSingleFileSource(path, config, declaredMapping, listener);
@@ -4413,6 +4415,22 @@ public class ExternalSourceResolver {
         // Preserve the full cause chain so mapResolveFailure's unwrap arms can still find any
         // status carrier (503, 429, etc.) buried inside it.
         return new IllegalArgumentException(detail, lastFailure);
+    }
+
+    /**
+     * True when a registered factory claims this path and resolves wildcard patterns remotely.
+     * <p>
+     * Selection must use the same config-aware {@code canHandle} and the same first-claim-wins iteration as the
+     * resolve rails below, or this can read {@code expandsPatternRemotely()} off a factory that would never resolve
+     * the path — the claims overlap, and an explicit {@code format} decides some of them.
+     */
+    private boolean expandsPatternRemotely(String path, Map<String, Object> config) {
+        for (ExternalSourceFactory factory : dataSourceModule.sourceFactories().values()) {
+            if (factory.canHandle(path, config)) {
+                return factory.expandsPatternRemotely();
+            }
+        }
+        return false;
     }
 
     private SourceMetadata resolveSingleSource(String path, Map<String, Object> config) {
