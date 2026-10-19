@@ -1,0 +1,38 @@
+/*
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
+ */
+
+apply plugin: 'elasticsearch.internal-es-plugin'
+apply plugin: 'elasticsearch.publish'
+apply plugin: 'elasticsearch.esql-release'
+
+esplugin {
+  name = 'esql-datasource-elasticsearch'
+  description = 'Connector for querying another Elasticsearch cluster as an ESQL external data source'
+  classname = 'org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin'
+  extendedPlugins = ['x-pack-esql']
+}
+
+base {
+  archivesName = 'esql-datasource-elasticsearch'
+}
+
+dependencies {
+  compileOnly project(path: xpackModule('esql'))
+  compileOnly project(path: xpackModule('esql-core'))
+  compileOnly project(path: xpackModule('core'))
+  compileOnly project(':server')
+  compileOnly project(xpackModule('esql:compute'))
+
+  // Low-level REST client to talk to the remote cluster over HTTP.
+  implementation project(':client:rest')
+
+  testImplementation project(':test:framework')
+  testImplementation(testArtifact(project(xpackModule('core'))))
+  testImplementation project(xpackModule('esql'))
+  testImplementation project(xpackModule('esql-core'))
+  testImplementation project(xpackModule('esql:qa:testFixtures'))
+}
