@@ -36,6 +36,37 @@ public interface ConnectorFactory extends ExternalSourceFactory {
     Connector open(Map<String, Object> config);
 
     /**
+     * Opens a connector for the given location URI and configuration map.
+     * <p>
+     * Defaults to {@link #open(Map)} for connectors that read connection details from {@code config}.
+     * Connectors that derive endpoint details from the location URI (including those that support
+     * registered datasets, where data-node rebinding replaces {@code config} with registered settings)
+     * should override this method.
+     */
+    default Connector open(StoragePath location, Map<String, Object> config) {
+        return open(config);
+    }
+
+    /**
+     * Extracts the target identifier (table, index, or pattern) to place in {@link QueryRequest}
+     * from the location URI and configuration map.
+     */
+    default String resolveTarget(StoragePath location, Map<String, Object> config) {
+        Object targetObj = config.get("target");
+        return targetObj != null ? targetObj.toString() : location.toString();
+    }
+
+    /**
+     * Whether this connector supports named datasets registered via {@code PUT _query/data_source}
+     * and {@code PUT _query/dataset}. Connectors that return {@code false} (the default) can only
+     * be invoked through inline {@code EXTERNAL} queries and are refused when a plan carries a
+     * registered dataset name.
+     */
+    default boolean supportsRegisteredDatasets() {
+        return false;
+    }
+
+    /**
      * Tests connectivity by opening and immediately closing a {@link Connector}. Connector implementations
      * that can perform a lighter-weight probe (e.g. a ping without allocating a full session) may override this.
      *

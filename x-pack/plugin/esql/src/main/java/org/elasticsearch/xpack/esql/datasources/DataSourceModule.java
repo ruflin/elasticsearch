@@ -26,6 +26,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.DataSourceUsageAccumulator;
 import org.elasticsearch.xpack.esql.datasources.spi.DecompressionCodec;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceMetrics;
+import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReaderFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatSpec;
 import org.elasticsearch.xpack.esql.datasources.spi.NodeByteBudget;
@@ -782,24 +783,60 @@ public final class DataSourceModule implements Closeable {
 
         @Override
         public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
-            return resolveDelegate().resolveMetadata(location, credentials.decryptInPlace(config));
+            return resolveDelegate().resolveMetadata(location, connectorConfig(config));
         }
 
         @Override
         public void validateConfig(String location, Map<String, Object> config) {
-            resolveDelegate().validateConfig(location, credentials.decryptInPlace(config));
+            resolveDelegate().validateConfig(location, connectorConfig(config));
         }
 
         @Override
         public void validateConfig(String location, Map<String, Object> config, Consumer<String> warningSink) {
             // Forward the sink rather than inheriting the interface default, which would drop it and
             // fall back to the two-argument form -- losing the resolver's buffered warning routing.
-            resolveDelegate().validateConfig(location, credentials.decryptInPlace(config), warningSink);
+            // Flatten _datasource then decrypt, matching resolveMetadata/open: the resolver always
+            // calls this form, so named-datasource queries would otherwise reject the carrier key.
+            resolveDelegate().validateConfig(location, connectorConfig(config), warningSink);
         }
 
         @Override
         public Connector open(Map<String, Object> config) {
-            return resolveDelegate().open(credentials.decryptInPlace(config));
+            return resolveDelegate().open(connectorConfig(config));
+        }
+
+        @Override
+        public Connector open(StoragePath location, Map<String, Object> config) {
+            return resolveDelegate().open(location, connectorConfig(config));
+        }
+
+        @Override
+        public String resolveTarget(StoragePath location, Map<String, Object> config) {
+            return resolveDelegate().resolveTarget(location, connectorConfig(config));
+        }
+
+        @Override
+        public boolean supportsRegisteredDatasets() {
+            return resolveDelegate().supportsRegisteredDatasets();
+        }
+
+        /**
+         * Flattens the {@code _datasource} sub-map (data-source connection settings forwarded by
+         * {@code DatasetRewriter} for a named data source) into the top level, then decrypts secret
+         * carriers, so a connector reads connection details and credentials as plain top-level keys.
+         * Also drops the file-lake {@code schema_resolution} default hydrated by {@code DatasetRewriter}
+         * on registered datasets (identified by {@code _dataset_context}) so connectors do not reject it
+         * as an unknown option while still rejecting user-supplied {@code schema_resolution} in inline
+         * {@code EXTERNAL ... WITH} clauses.
+         */
+        private Map<String, Object> connectorConfig(Map<String, Object> config) {
+            boolean fromDataset = config != null && config.containsKey(ExternalSourceResolver.DATASET_CONTEXT_KEY);
+            Map<String, Object> flattened = ExternalSourceResolver.storageConfig(config);
+            if (fromDataset && flattened.containsKey(ExternalSourceResolver.CONFIG_SCHEMA_RESOLUTION)) {
+                flattened = new HashMap<>(flattened);
+                flattened.remove(ExternalSourceResolver.CONFIG_SCHEMA_RESOLUTION);
+            }
+            return credentials.decryptInPlace(flattened);
         }
 
         @Override
@@ -810,6 +847,45 @@ public final class DataSourceModule implements Closeable {
         @Override
         public SourceOperatorFactoryProvider operatorFactory() {
             return resolveDelegate().operatorFactory();
+        }
+
+        @Override
+        public FilterPushdownSupport filterPushdownSupport() {
+            // Intentionally resolves (and thereby class-loads) the delegate plugin during physical
+            // optimization when a query has a pushable filter. Pushdown support is instance behavior of
+            // the connector factory rather than static plugin metadata, so it cannot be answered without
+            // the plugin. This is accepted: a query that triggers this is about to execute against the
+            // connector anyway, so the plugin would load momentarily. See DataSourceModuleLazyLoadingTests.
+            return resolveDelegate().filterPushdownSupport();
+        }
+
+        @Override
+        public boolean expandsPatternRemotely() {
+            // Only consulted after canHandle() during source resolution, which already resolves the
+            // delegate, so this does not cause additional eager loading during optimization.
+            return resolveDelegate().expandsPatternRemotely();
+        }
+
+        @Override
+        public boolean sortPushdownSupported() {
+            // Like filterPushdownSupport(): only consulted during physical optimization when a query has a
+            // pushable sort over this connector, which is about to execute against it anyway. Resolving (and
+            // class-loading) the delegate here is accepted for the same reason.
+            return resolveDelegate().sortPushdownSupported();
+        }
+
+        @Override
+        public boolean aggregatePushdownSupported() {
+            // Same contract as sortPushdownSupported(): consulted during optimization of a query that is about
+            // to execute against this connector, so resolving the delegate here causes no extra eager loading.
+            return resolveDelegate().aggregatePushdownSupported();
+        }
+
+        @Override
+        public boolean samplePushdownSupported() {
+            // Same contract as sortPushdownSupported(): consulted during optimization of a query that is about
+            // to execute against this connector, so resolving the delegate here causes no extra eager loading.
+            return resolveDelegate().samplePushdownSupported();
         }
 
         private ConnectorFactory resolveDelegate() {

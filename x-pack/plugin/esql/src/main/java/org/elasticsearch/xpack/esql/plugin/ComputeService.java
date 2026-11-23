@@ -108,6 +108,7 @@ import org.elasticsearch.xpack.esql.datasources.SplitStats;
 import org.elasticsearch.xpack.esql.datasources.glob.PlanningMemory;
 import org.elasticsearch.xpack.esql.datasources.spi.AggregatePushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalPlanningIo;
+import org.elasticsearch.xpack.esql.datasources.spi.ExternalSourceFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
 import org.elasticsearch.xpack.esql.datasources.spi.FormatReader;
@@ -375,6 +376,10 @@ public class ComputeService {
         return formatReaderRegistry;
     }
 
+    Map<String, ExternalSourceFactory> sourceFactories() {
+        return operatorFactoryRegistry == null ? Map.of() : operatorFactoryRegistry.sourceFactories();
+    }
+
     /**
      * Reserves survivor-map and split-shell memory for every resolved {@link ExternalSourceExec} before local
      * split discovery. Each source is billed from its own retained keys and shared row count. Unresolved lists
@@ -392,6 +397,7 @@ public class ComputeService {
     private static void chargePhase2(List<Attribute> output, @Nullable FileList list, ExternalPlanningReservation.Run run) {
         if (run == null) {
             return;
+
         }
         long bytes = Phase2Reservation.bytesFor(output, list);
         if (bytes > 0L) {
@@ -2220,6 +2226,7 @@ public class ComputeService {
                         plan,
                         localStats,
                         formatReaderRegistry,
+                        sourceFactories(),
                         coordinatorExternalSplits,
                         planTimeProfile,
                         datasetConfigResolver

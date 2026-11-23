@@ -118,9 +118,12 @@ import org.elasticsearch.xpack.esql.datasources.spi.Connector;
 import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.ExternalSplit;
 import org.elasticsearch.xpack.esql.datasources.spi.FileList;
+import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
+import org.elasticsearch.xpack.esql.datasources.spi.ResultCursor;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceOperatorContext;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceOperatorFactoryProvider;
+import org.elasticsearch.xpack.esql.datasources.spi.Split;
 import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.datasources.spi.TableCatalog;
 import org.elasticsearch.xpack.esql.expression.Order;
@@ -604,6 +607,88 @@ public class LocalExecutionPlannerTests extends MapperServiceTestCase {
         OperatorFactoryRegistry operatorFactoryRegistry = new OperatorFactoryRegistry(Map.of("flight", connector), Map.of(), Runnable::run);
         assertRegisteredDatasetRefusedForNonFileSourceType(operatorFactoryRegistry, "flight");
         assertNull(opened.get());
+    }
+
+    public void testRegisteredDatasetAllowedForOptInConnectorWithMatchingPathAndRefusedForMismatch() throws IOException {
+        AtomicReference<String> openedLocation = new AtomicReference<>();
+        ConnectorFactory esConnector = new ConnectorFactory() {
+            @Override
+            public String type() {
+                return "elasticsearch";
+            }
+
+            @Override
+            public boolean canHandle(String location) {
+                return location != null && location.startsWith("es://");
+            }
+
+            @Override
+            public boolean supportsRegisteredDatasets() {
+                return true;
+            }
+
+            @Override
+            public SourceMetadata resolveMetadata(String location, Map<String, Object> config) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void validateConfig(String location, Map<String, Object> config) {
+                ConfigKeyValidator.check(config, List.of());
+            }
+
+            @Override
+            public Connector open(Map<String, Object> config) {
+                throw new AssertionError("expected location-aware open");
+            }
+
+            @Override
+            public Connector open(StoragePath location, Map<String, Object> config) {
+                openedLocation.set(location.toString());
+                return new Connector() {
+                    @Override
+                    public ResultCursor execute(QueryRequest request, Split split) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    @Override
+                    public void close() {}
+                };
+            }
+        };
+        OperatorFactoryRegistry operatorFactoryRegistry = new OperatorFactoryRegistry(
+            Map.of("elasticsearch", esConnector),
+            Map.of(),
+            Runnable::run
+        );
+        // Mismatched scheme (e.g. an S3 dataset paired with sourceType "elasticsearch") must still be refused.
+        assertRegisteredDatasetRefusedForNonFileSourceType(operatorFactoryRegistry, "elasticsearch");
+        assertNull(openedLocation.get());
+
+        // Matching scheme (es://) is accepted and opened with the rebound StoragePath.
+        List<Attribute> attrs = List.of(
+            new FieldAttribute(Source.EMPTY, "a", new EsField("a", DataType.INTEGER, Map.of(), true, EsField.TimeSeriesFieldType.NONE))
+        );
+        ExternalSourceExec exec = new ExternalSourceExec(
+            Source.EMPTY,
+            "es://remote.example:9200/logs-*",
+            "elasticsearch",
+            attrs,
+            Map.of(),
+            Map.of(),
+            null,
+            10
+        ).withDatasetName("remote_logs");
+
+        planner(operatorFactoryRegistry, true, null, randomBoolean()).plan(
+            "test",
+            FoldContext.small(),
+            PlannerSettings.DEFAULTS,
+            exec,
+            EmptyIndexedByShardId.instance(),
+            randomBoolean()
+        );
+        assertThat(openedLocation.get(), equalTo("es://remote.example:9200/logs-*"));
     }
 
     public void testRegisteredDatasetRefusedThroughTableCatalogSourceType() throws IOException {

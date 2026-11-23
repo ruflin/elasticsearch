@@ -72,24 +72,13 @@ public class OperatorFactoryRegistry {
         ExternalSourceFactory sf = sourceType != null ? sourceFactories.get(sourceType) : null;
         if (sf != null) {
             if (sf instanceof ConnectorFactory cf) {
-                Connector connector = cf.open(context.config());
+                Connector connector = cf.open(context.path(), context.config());
                 List<String> projectedColumns = new ArrayList<>(context.attributes().size());
                 for (Attribute attr : context.attributes()) {
                     projectedColumns.add(attr.name());
                 }
-                // Use the target from resolved config (e.g. path component for Flight URIs);
-                // fall back to the full path string for connectors that don't set it.
-                Object targetObj = context.config().get("target");
-                String target = targetObj != null ? targetObj.toString() : context.path().toString();
-                // QueryRequest carries the still-encrypted config; connectors take secrets from open(), not request.config().
-                QueryRequest request = new QueryRequest(
-                    target,
-                    projectedColumns,
-                    context.attributes(),
-                    context.config(),
-                    context.batchSize(),
-                    null
-                );
+                String target = cf.resolveTarget(context.path(), context.config());
+                QueryRequest request = QueryRequest.forConnector(target, projectedColumns, context);
                 return new AsyncConnectorSourceOperatorFactory(connector, request, context.maxBufferSize(), executor, context.sliceQueue());
             }
             SourceOperatorFactoryProvider opFactory = sf.operatorFactory();
@@ -115,6 +104,23 @@ public class OperatorFactoryRegistry {
      */
     public boolean isFileSourceFactory(String sourceType) {
         return sourceType != null && sourceFactories.get(sourceType) instanceof FileSourceFactory;
+    }
+
+    /**
+     * Whether a registered dataset with the given {@code sourceType} and rebound {@code sourcePath}
+     * may be read through this registry. Allows the built-in file factory, or a {@link ConnectorFactory}
+     * that explicitly opts in to registered datasets and handles {@code sourcePath} (preventing a
+     * crafted plan from pairing a file dataset's credentials with a connector).
+     */
+    public boolean supportsRegisteredDatasets(String sourceType, String sourcePath) {
+        if (sourceType == null) {
+            return false;
+        }
+        ExternalSourceFactory sf = sourceFactories.get(sourceType);
+        if (sf instanceof FileSourceFactory) {
+            return true;
+        }
+        return sf instanceof ConnectorFactory cf && cf.supportsRegisteredDatasets() && cf.canHandle(sourcePath);
     }
 
     public Map<String, ExternalSourceFactory> sourceFactories() {

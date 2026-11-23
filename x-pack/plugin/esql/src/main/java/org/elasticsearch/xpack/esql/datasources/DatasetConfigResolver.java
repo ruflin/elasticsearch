@@ -130,12 +130,13 @@ public final class DatasetConfigResolver {
 
     /**
      * The paths a resource names, one per top-level comma segment, decomposed the way the listing does
-     * ({@link GlobExpander#commaSegments}) so a comma inside a brace group stays part of its glob. An HTTP resource is
-     * always one path: the listing never treats its commas as separators, so neither does this.
+     * ({@link GlobExpander#commaSegments}) so a comma inside a brace group stays part of its glob. Single-URI
+     * schemes (HTTP(S) and remote Elasticsearch index expressions) are never split on commas: their commas
+     * belong to the remote resource path rather than separating multiple URIs.
      */
     private static List<ResourcePath> resourcePaths(String resource) {
         StoragePath whole = StoragePath.of(resource);
-        if (whole.scheme().equalsIgnoreCase("http") || whole.scheme().equalsIgnoreCase("https")) {
+        if (isSingleUriScheme(whole.scheme())) {
             return List.of(resourcePath(whole));
         }
         List<ResourcePath> paths = new ArrayList<>();
@@ -143,6 +144,15 @@ public final class DatasetConfigResolver {
             paths.add(resourcePath(StoragePath.of(segment)));
         }
         return paths;
+    }
+
+    private static boolean isSingleUriScheme(String scheme) {
+        return scheme.equalsIgnoreCase("http")
+            || scheme.equalsIgnoreCase("https")
+            || scheme.equalsIgnoreCase("es")
+            || scheme.equalsIgnoreCase("elasticsearch")
+            || scheme.equalsIgnoreCase("es+https")
+            || scheme.equalsIgnoreCase("elasticsearch+https");
     }
 
     private static ResourcePath resourcePath(StoragePath path) {

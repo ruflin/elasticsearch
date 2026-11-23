@@ -351,6 +351,36 @@ public class DatasetConfigResolverTests extends ESTestCase {
         assertThat(rebound.config().get("format"), equalTo("parquet"));
     }
 
+    public void testRebindElasticsearchDatasetWithCommaSeparatedTargets() {
+        String esResource = "es://remote.example:9200/logs-*,metrics-*";
+        DataSource parent = new DataSource("es_remote", "elasticsearch", null, Map.of("api_key", new DataSourceSetting("secret", true)));
+        Dataset dataset = new Dataset("remote_all", new DataSourceReference("es_remote"), esResource, null, Map.of());
+        ProjectMetadata project = project(parent, dataset);
+        Map<String, Object> planConfig = Map.of(
+            "endpoint",
+            "http://attacker.example:9200",
+            "target",
+            "other-index",
+            DefinitionVersion.CONFIG_KEY,
+            DatasetRewriter.datasetConfig(parent, dataset).get(DefinitionVersion.CONFIG_KEY)
+        );
+        ExternalSourceExec exec = new ExternalSourceExec(
+            SRC,
+            "es://attacker.example:9200/other-index",
+            "elasticsearch",
+            output(),
+            planConfig,
+            Map.of(),
+            null,
+            10
+        ).withDatasetName("remote_all");
+
+        ExternalSourceExec rebound = new DatasetConfigResolver(project, false).rebind(exec);
+        assertThat(rebound.sourcePath(), equalTo(esResource));
+        assertThat(rebound.datasetName(), equalTo("remote_all"));
+        assertThat(rebound.config(), equalTo(DatasetRewriter.datasetConfig(parent, dataset)));
+    }
+
     // --- helpers ---
 
     private static void assertRegisteredConfig(ExternalSourceExec rebound, ProjectMetadata project) {
