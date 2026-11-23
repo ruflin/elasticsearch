@@ -14,6 +14,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.DataSourceValidator;
 import org.elasticsearch.xpack.esql.datasources.spi.StorageProviderFactory;
 
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Registration shape for the elasticsearch connector plugin. Registration is gated on
@@ -52,5 +53,12 @@ public class ElasticsearchDataSourcePluginTests extends ESTestCase {
         assertTrue(plugin.storageProviders(Settings.EMPTY).isEmpty());
         assertTrue(plugin.connectors(Settings.EMPTY).isEmpty());
         assertTrue(plugin.datasourceValidators(Settings.EMPTY).isEmpty());
+    }
+
+    public void testSecretSettingNamesAlwaysReported() {
+        // Must be reported unconditionally (regardless of feature flag) so SecurityRestFilter
+        // redacts api_key from PUT _query/data_source audit log bodies.
+        ElasticsearchDataSourcePlugin plugin = new ElasticsearchDataSourcePlugin();
+        assertEquals(Set.of("api_key"), plugin.datasourceSecretSettingNames());
     }
 }

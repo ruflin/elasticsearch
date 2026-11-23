@@ -21,6 +21,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.QueryRequest;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteAggregate;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteGrouping;
 import org.elasticsearch.xpack.esql.datasources.spi.RemoteSort;
+import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 import org.elasticsearch.xpack.esql.expression.predicate.operator.comparison.GreaterThan;
 import org.junit.After;
 
@@ -430,6 +431,17 @@ public class ElasticsearchConnectorFactoryTests extends ESTestCase {
     public void testSamplePushdownSupported() {
         // The remote source speaks ES|QL, so SAMPLE is pushed down (the optimizer removes the local SampleExec).
         assertTrue(new ElasticsearchConnectorFactory().samplePushdownSupported());
+    }
+
+    public void testSupportsRegisteredDatasetsAndLocationBasedOpen() throws Exception {
+        try (ElasticsearchConnectorFactory factory = new ElasticsearchConnectorFactory()) {
+            assertTrue(factory.supportsRegisteredDatasets());
+            StoragePath location = StoragePath.of("es://remote.example:9200/logs-*,metrics-*");
+            assertEquals("logs-*,metrics-*", factory.resolveTarget(location, Map.of()));
+            try (Connector connector = factory.open(location, Map.of())) {
+                assertNotNull(connector);
+            }
+        }
     }
 
 }

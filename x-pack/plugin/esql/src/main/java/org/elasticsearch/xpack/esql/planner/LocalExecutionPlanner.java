@@ -2482,8 +2482,10 @@ public class LocalExecutionPlanner {
         if (operatorFactoryRegistry == null) {
             throw new IllegalStateException("OperatorFactoryRegistry is required for external sources");
         }
-        // The plan carries the source type, but registered dataset settings are only valid with the file source factory.
-        if (externalSource.datasetName() != null && operatorFactoryRegistry.isFileSourceFactory(externalSource.sourceType()) == false) {
+        // The plan carries the source type, so verify the target factory supports registered datasets for the
+        // rebound source path (file factory, or a connector that opts in and handles this path's scheme).
+        if (externalSource.datasetName() != null
+            && operatorFactoryRegistry.supportsRegisteredDatasets(externalSource.sourceType(), externalSource.sourcePath()) == false) {
             throw new IllegalArgumentException(
                 "external dataset ["
                     + externalSource.datasetName()

@@ -70,6 +70,10 @@ public class ElasticsearchConfiguration extends DataSourceConfiguration {
         }
     }
 
+    public static Set<String> secretFieldNames() {
+        return secretFieldNamesFrom(FIELDS);
+    }
+
     public String apiKey() {
         return get(API_KEY.name());
     }

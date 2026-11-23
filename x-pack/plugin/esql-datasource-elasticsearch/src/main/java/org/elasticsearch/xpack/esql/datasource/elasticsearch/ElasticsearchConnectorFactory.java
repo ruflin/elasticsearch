@@ -33,6 +33,7 @@ import org.elasticsearch.xpack.esql.datasources.spi.ConnectorFactory;
 import org.elasticsearch.xpack.esql.datasources.spi.FilterPushdownSupport;
 import org.elasticsearch.xpack.esql.datasources.spi.SimpleSourceMetadata;
 import org.elasticsearch.xpack.esql.datasources.spi.SourceMetadata;
+import org.elasticsearch.xpack.esql.datasources.spi.StoragePath;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -169,12 +170,28 @@ class ElasticsearchConnectorFactory implements ConnectorFactory, Closeable {
     }
 
     @Override
+    public boolean supportsRegisteredDatasets() {
+        return true;
+    }
+
+    @Override
     public Connector open(Map<String, Object> config) {
         String baseUrl = Objects.toString(config.get(CONFIG_ENDPOINT), null);
         if (baseUrl == null) {
             throw new IllegalArgumentException("Elasticsearch connector requires '" + CONFIG_ENDPOINT + "' in config");
         }
         return new ElasticsearchConnector(clientFor(baseUrl, apiKey(config), config));
+    }
+
+    @Override
+    public Connector open(StoragePath location, Map<String, Object> config) {
+        Endpoint endpoint = parseLocation(location.toString());
+        return new ElasticsearchConnector(clientFor(endpoint.baseUrl(), apiKey(config), config));
+    }
+
+    @Override
+    public String resolveTarget(StoragePath location, Map<String, Object> config) {
+        return parseLocation(location.toString()).target();
     }
 
     @Override

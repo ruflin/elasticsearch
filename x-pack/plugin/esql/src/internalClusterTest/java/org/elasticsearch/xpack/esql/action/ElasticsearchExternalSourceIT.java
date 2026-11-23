@@ -21,6 +21,7 @@ import org.elasticsearch.test.NodeConfigurationSource;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.esql.datasource.elasticsearch.ElasticsearchDataSourcePlugin;
+import org.elasticsearch.xpack.esql.datasources.dataset.DeleteDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.dataset.PutDatasetAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.DeleteDataSourceAction;
 import org.elasticsearch.xpack.esql.datasources.datasource.GetDataSourceAction;
@@ -222,6 +223,82 @@ public class ElasticsearchExternalSourceIT extends AbstractEsqlIntegTestCase {
         List<List<Object>> rows = runExternal(query);
         assertThat(rows.size(), equalTo(1));
         assertThat(rows.get(0), equalTo(List.of("bob", 35L)));
+    }
+
+    public void testQueryNamedDatasetOverHttp() throws Exception {
+        assumeTrue("requires dataset-in-from-command capability", DATASET_IN_FROM_COMMAND.isEnabled());
+
+        String remoteIndexA = "remote-ds-a";
+        String remoteIndexB = "remote-ds-b";
+        indexRemoteDocs(remoteIndexA);
+        remoteCluster.client().admin().indices().prepareCreate(remoteIndexB).setMapping("name", "type=keyword", "age", "type=long").get();
+        indexRemoteDoc(remoteIndexB, "4", "{\"name\":\"dave\",\"age\":45}");
+        remoteCluster.client().admin().indices().prepareRefresh(remoteIndexB).get();
+
+        TimeValue timeout = TimeValue.timeValueSeconds(10);
+        String dataSourceName = "remote_es_ds";
+        String singleDataset = "remote_es_single";
+        String multiDataset = "remote_es_multi";
+        assertTrue(
+            client().execute(
+                PutDataSourceAction.INSTANCE,
+                new PutDataSourceAction.Request(timeout, timeout, dataSourceName, "elasticsearch", null, Map.of())
+            ).actionGet(timeout).isAcknowledged()
+        );
+        try {
+            assertTrue(
+                client().execute(
+                    PutDatasetAction.INSTANCE,
+                    new PutDatasetAction.Request(
+                        timeout,
+                        timeout,
+                        singleDataset,
+                        dataSourceName,
+                        "es://" + remoteHttpAddress() + "/" + remoteIndexA,
+                        null,
+                        Map.of()
+                    )
+                ).actionGet(timeout).isAcknowledged()
+            );
+            assertTrue(
+                client().execute(
+                    PutDatasetAction.INSTANCE,
+                    new PutDatasetAction.Request(
+                        timeout,
+                        timeout,
+                        multiDataset,
+                        dataSourceName,
+                        "es://" + remoteHttpAddress() + "/" + remoteIndexA + "," + remoteIndexB,
+                        null,
+                        Map.of()
+                    )
+                ).actionGet(timeout).isAcknowledged()
+            );
+
+            // Plain FROM <dataset> with filter, sort, and limit pushdown.
+            List<List<Object>> rows = runExternal("FROM " + singleDataset + " | WHERE age >= 35 | KEEP name, age | SORT age | LIMIT 2");
+            assertThat(rows, equalTo(List.of(List.of("bob", 35L), List.of("carol", 40L))));
+
+            // STATS pushdown through a named dataset.
+            List<List<Object>> statsRows = runExternal("FROM " + singleDataset + " | STATS c = COUNT(*), max_age = MAX(age)");
+            assertThat(statsRows, equalTo(List.of(List.of(3L, 40L))));
+
+            // Comma-separated remote index expression in dataset.resource().
+            List<List<Object>> multiRows = runExternal("FROM " + multiDataset + " | KEEP name, age | SORT age");
+            assertThat(
+                multiRows,
+                equalTo(List.of(List.of("alice", 30L), List.of("bob", 35L), List.of("carol", 40L), List.of("dave", 45L)))
+            );
+        } finally {
+            client().execute(
+                DeleteDatasetAction.INSTANCE,
+                new DeleteDatasetAction.Request(timeout, timeout, new String[] { singleDataset, multiDataset })
+            ).actionGet(timeout);
+            client().execute(
+                DeleteDataSourceAction.INSTANCE,
+                new DeleteDataSourceAction.Request(timeout, timeout, new String[] { dataSourceName })
+            ).actionGet(timeout);
+        }
     }
 
     /**

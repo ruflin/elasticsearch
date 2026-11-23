@@ -102,4 +102,9 @@ public class ElasticsearchDataSourcePlugin extends Plugin implements DataSourceP
         DataSourceValidator validator = new ElasticsearchDataSourceValidator();
         return Map.of(validator.type(), validator);
     }
+
+    @Override
+    public Set<String> datasourceSecretSettingNames() {
+        return ElasticsearchConfiguration.secretFieldNames();
+    }
 }

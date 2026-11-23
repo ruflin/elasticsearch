@@ -805,15 +805,38 @@ public final class DataSourceModule implements Closeable {
             return resolveDelegate().open(connectorConfig(config));
         }
 
+        @Override
+        public Connector open(StoragePath location, Map<String, Object> config) {
+            return resolveDelegate().open(location, connectorConfig(config));
+        }
+
+        @Override
+        public String resolveTarget(StoragePath location, Map<String, Object> config) {
+            return resolveDelegate().resolveTarget(location, connectorConfig(config));
+        }
+
+        @Override
+        public boolean supportsRegisteredDatasets() {
+            return resolveDelegate().supportsRegisteredDatasets();
+        }
+
         /**
          * Flattens the {@code _datasource} sub-map (data-source connection settings forwarded by
          * {@code DatasetRewriter} for a named data source) into the top level, then decrypts secret
          * carriers, so a connector reads connection details and credentials as plain top-level keys.
-         * Mirrors the storage-provider path in {@code StorageProviderRegistry}; for inline {@code EXTERNAL}
-         * queries (no {@code _datasource}) the config is unchanged apart from decryption.
+         * Also drops the file-lake {@code schema_resolution} default hydrated by {@code DatasetRewriter}
+         * on registered datasets (identified by {@code _dataset_context}) so connectors do not reject it
+         * as an unknown option while still rejecting user-supplied {@code schema_resolution} in inline
+         * {@code EXTERNAL ... WITH} clauses.
          */
         private Map<String, Object> connectorConfig(Map<String, Object> config) {
-            return credentials.decryptInPlace(ExternalSourceResolver.storageConfig(config));
+            boolean fromDataset = config != null && config.containsKey(ExternalSourceResolver.DATASET_CONTEXT_KEY);
+            Map<String, Object> flattened = ExternalSourceResolver.storageConfig(config);
+            if (fromDataset && flattened.containsKey(ExternalSourceResolver.CONFIG_SCHEMA_RESOLUTION)) {
+                flattened = new HashMap<>(flattened);
+                flattened.remove(ExternalSourceResolver.CONFIG_SCHEMA_RESOLUTION);
+            }
+            return credentials.decryptInPlace(flattened);
         }
 
         @Override
